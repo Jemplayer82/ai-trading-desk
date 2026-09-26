@@ -79,6 +79,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "web/spy_allocator.py",
         "web/spy_routes.py",
         "web/research_engine.py",
+        "web/research_routes.py",
         "web/static/spy.js",
         "tests/test_spy_scanner_store.py",
         "tests/test_spy_scan_status_endpoint.py",
@@ -93,6 +94,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "tests/test_rebalance_carryover.py",
         "tests/test_spy_account_form_js.py",
         "tests/test_research_engine.py",
+        "tests/test_research_routes.py",
     ],
     2: [
         "web/schwab_routes.py",

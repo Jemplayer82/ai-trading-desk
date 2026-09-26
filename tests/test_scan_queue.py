@@ -154,6 +154,24 @@ class TestResearchDispatch:
         assert row["error"] == "scan kind not supported at this tier"
         assert started == []
 
+    def test_research_routes_runner_resolved_live(self, tmp_db, monkeypatch, thread_spy):
+        """Importing web.research_routes registers its runner. Because
+        resolve_runner uses a live getattr, monkeypatching the module attribute
+        after registration is what gets dispatched."""
+        rr = pytest.importorskip("web.research_routes")
+        scan_queue.register_runner("research", rr, "_run_research_thread")
+        sentinel = lambda scan_id, trade_date: None
+        monkeypatch.setattr(rr, "_run_research_thread", sentinel)
+        td = "2026-08-03"
+        scan_id = db.create_spy_scan(td, kind="research", status="queued")
+
+        scan_queue._dequeue_next_scan()
+
+        assert len(thread_spy) == 1
+        assert thread_spy[0]["target"] is sentinel
+        assert thread_spy[0]["args"] == (scan_id, td)
+        assert db.get_spy_scan(scan_id)["status"] == "running_quick"
+
 
 class TestSpawnWorkerAndResolveRunner:
     def test_spawn_worker_runs_target_in_daemon_thread(self):
@@ -210,8 +228,10 @@ class TestPortfolioAppTierGating:
             expected |= {"/api/portfolio-scan", "/api/portfolio-scans",
                          "/api/portfolio-scans/{scan_id}", "/api/accounts"}
         if features.enabled("sp500"):
-            expected |= {"/api/paper-accounts", "/api/spy-scan", "/api/spy-scans",
-                         "/api/spy-account", "/api/spy-account/compare"}
+            expected |= {"/api/paper-accounts", "/api/research-scan",
+                         "/api/research-scans/today", "/api/spy-scan",
+                         "/api/spy-scans", "/api/spy-account",
+                         "/api/spy-account/compare"}
         if features.enabled("options"):
             expected |= {"/api/options-scan", "/api/options-positions", "/api/options-summary"}
         assert expected <= paths
@@ -223,7 +243,9 @@ class TestPortfolioAppTierGating:
         paths = app_paths(TIER="2")
         assert "/api/portfolio-scan" in paths
         assert "/api/accounts" in paths
-        assert not [p for p in paths if p.startswith(("/api/spy", "/api/options", "/api/paper-accounts"))]
+        assert not [p for p in paths if p.startswith(
+            ("/api/spy", "/api/options", "/api/paper-accounts", "/api/research")
+        )]
 
     @pytest.mark.skipif(features.DEFAULT_TIER < 3,
                          reason="spy_routes.py isn't physically present below tier 3 — "

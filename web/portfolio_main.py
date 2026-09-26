@@ -52,7 +52,8 @@ if features.enabled("schwab"):
     from . import portfolio_routes
     app.include_router(portfolio_routes.router)
 if features.enabled("sp500"):
-    from . import spy_routes
+    from . import research_routes, spy_routes
+    app.include_router(research_routes.router)
     app.include_router(spy_routes.router)
 if features.enabled("options"):
     from . import options_routes
