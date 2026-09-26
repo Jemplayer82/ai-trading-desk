@@ -63,7 +63,7 @@ def test_stopped_positions_selects_only_stop_reasons():
         {"ticker": "AAPL", "action": "EXITED", "exit_reason": "stop_loss"},
         {"ticker": "MSFT", "action": "EXITED", "exit_reason": "trail_stop"},
         {"ticker": "GOOGL", "action": "EXITED", "exit_reason": "stop_limit"},
-        {"ticker": "AMZN", "action": "EXITED"},  # weekly rebalance exit — no reason
+        {"ticker": "AMZN", "action": "EXITED"},  # daily allocation exit — no reason
         {"ticker": "META", "action": "HOLD"},  # still live
     ]
     stopped = spy_allocator.stopped_positions(portfolio)

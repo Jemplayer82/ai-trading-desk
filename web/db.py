@@ -17,7 +17,8 @@ Tables:
   analyses               - one row per single-ticker analysis
   portfolio_scans      - one row per nightly portfolio sweep (Schwab)
   portfolio_tickers    - join row connecting a scan to the analyses it generated
-  spy_scans            - one row per weekly S&P 500 scanner run
+  spy_scans            - one row per shared daily research run or per-account
+                         daily allocation
   spy_quick_results    - one row per ticker per SPY scan (quick + deep results)
   llm_activity         - cross-container registry of in-flight LLM consumers
   ticker_info          - cached company name/website per ticker

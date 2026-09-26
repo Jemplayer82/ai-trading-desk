@@ -1391,7 +1391,7 @@ def apply_stops_and_value(
     # call, so an exited row's cost is already back inside `basis - deployed`,
     # adding (proceeds - cost) converts that implicit full refund into the real
     # outcome and makes the gain/loss survive every subsequent refresh. Only rows
-    # carrying exit_proceeds count, so rows the weekly rebalance EXITED (which have
+    # carrying exit_proceeds count, so rows the daily allocation EXITED (which have
     # none) behave exactly as they do today.
     realized = 0.0
     for r in portfolio:
@@ -1506,7 +1506,7 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     Prefers one bulk Schwab quote call (real-time); falls back to yfinance
     closes. Also diffs each position's entry signal against its latest
     quick-scan signal and records flips in rebalance_notes — that's the
-    signal-flip surface the dashboard and the weekly rebalance read. Called
+    signal-flip surface the dashboard and the daily allocation read. Called
     hourly on weekdays by the scheduler and once right after a scan completes.
 
     Return shapes are mutually exclusive: on success, a mark-to-market payload
