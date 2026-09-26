@@ -12,6 +12,7 @@ tests/test_options_lifecycle.py.
 from __future__ import annotations
 
 import importlib
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -118,6 +119,58 @@ class TestRunnerRegistry:
         assert thread_spy[0]["target"] is _patched
         assert thread_spy[0]["args"] == (scan_id, "2026-08-03")
         assert db.get_spy_scan(scan_id)["status"] == "running_quick"
+
+
+class TestResearchDispatch:
+    """kind='research' spy rows dispatch to the runner registered under "research"."""
+
+    def test_queued_research_row_dispatches_to_research_runner(self, tmp_db, monkeypatch):
+        td = "2026-08-03"
+        calls: list[tuple] = []
+
+        def recorder(*args):
+            calls.append(args)
+
+        ns = types.SimpleNamespace(run=recorder)
+        monkeypatch.setitem(scan_queue._RUNNERS, "research", (ns, "run"))
+        monkeypatch.setattr(scan_queue, "spawn_worker", lambda target, *a: target(*a))
+        scan_id = db.create_spy_scan(td, kind="research", status="queued")
+
+        scan_queue._dequeue_next_scan()
+
+        assert calls == [(scan_id, td)]
+        assert db.get_spy_scan(scan_id)["status"] == "running_quick"
+
+    def test_queued_research_row_fails_without_runner(self, tmp_db, monkeypatch):
+        monkeypatch.delitem(scan_queue._RUNNERS, "research", raising=False)
+        started: list[tuple] = []
+        monkeypatch.setattr(scan_queue, "spawn_worker", lambda target, *a: started.append((target, a)))
+        scan_id = db.create_spy_scan("2026-08-03", kind="research", status="queued")
+
+        scan_queue._dequeue_next_scan()
+
+        row = db.get_spy_scan(scan_id)
+        assert row["status"] == "failed"
+        assert row["error"] == "scan kind not supported at this tier"
+        assert started == []
+
+
+class TestSpawnWorkerAndResolveRunner:
+    def test_spawn_worker_runs_target_in_daemon_thread(self):
+        calls: list[tuple] = []
+
+        def fn(*args):
+            calls.append(args)
+
+        t = scan_queue.spawn_worker(fn, 1, "x")
+        t.join(timeout=5)
+
+        assert t.daemon is True
+        assert not t.is_alive()
+        assert calls == [(1, "x")]
+
+    def test_resolve_runner_unknown_key_is_none(self):
+        assert scan_queue.resolve_runner("nope") is None
 
 
 class TestPortfolioAppTierGating:
@@ -247,6 +300,17 @@ class TestWaitMarketReleasesTheQueue:
         assert result["queued"][0]["id"] == queued_id
 
 
+    def test_status_endpoint_reports_research_waiters(self, tmp_db):
+        waiter_id = db.create_spy_scan("2026-08-03", status="running_wait_research")
+
+        result = portfolio_main.scan_status()
+
+        assert result["running"] is None
+        assert len(result["waiting"]) == 1
+        assert result["waiting"][0]["id"] == waiter_id
+        assert result["waiting"][0]["status"] == "running_wait_research"
+
+
 class TestWaitMarketKillSwitchRestoresBusy:
     """OPTIONS_RELEASE_SLOT_DURING_WAIT=0 must roll back the whole
     concurrency guard, not just the proactive dequeue — a parked build
@@ -281,7 +345,7 @@ class TestWaitMarketKillSwitchRestoresBusy:
 
     def test_falsy_variants_all_restore_busy(self, tmp_db, monkeypatch):
         """"0", "false", "no", "off" (any case) all disable release,
-        matching options_engine._slot_release_enabled's exact falsy set."""
+        mirroring scan_queue's own OPTIONS_RELEASE_SLOT_DURING_WAIT switch."""
         for value in ("0", "false", "No", "OFF"):
             monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", value)
             scan_id = db.create_spy_scan("2026-08-03", status="running_wait_market")

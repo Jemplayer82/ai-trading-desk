@@ -144,7 +144,8 @@ def _blocking_scan(status: dict) -> dict | None:
     """Return the scan that a redeploy would kill.
 
     The status endpoint exposes an actively running scan plus a separate
-    ``waiting`` list of scans parked in the market-open or allocation-slot
+    ``waiting`` list of scans parked in the shared-research wait
+    (``running_wait_research``), the market-open wait or the allocation-slot
     wait. Both represent live, heartbeating workers whose container this
     redeploy would recreate and kill. Prefer the running scan if present,
     otherwise report the first waiting scan, otherwise None.

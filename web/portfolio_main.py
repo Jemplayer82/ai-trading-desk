@@ -81,8 +81,11 @@ def scan_status() -> dict[str, Any]:
     """Current scan queue state — used by the frontend and by agents before triggering.
 
     Returns the actively running scan (if any), the ordered queue of waiting scans,
-    and a ``waiting`` list of scans parked in the market-open (or allocation-slot)
-    wait — alive and heartbeating, but not holding the compute slot.
+    and a ``waiting`` list of scans in any of ``scan_queue.WAITING_STATUSES`` —
+    parked on the shared research row (``running_wait_research``), the 09:35 ET
+    market open (``running_wait_market``) or the allocation lock
+    (``running_wait_alloc``). They are alive and heartbeating, but not holding
+    the compute slot.
 
     The ``running`` object carries ``scan_type``, ``id``, ``trade_date``, ``kind``,
     ``created_at``, ``status``, and progress fields: for a portfolio row,
@@ -101,10 +104,12 @@ def scan_status() -> dict[str, Any]:
             " FROM spy_scans WHERE status = 'queued'"
             " ORDER BY created_at"
         ).fetchall()
+        waiting_placeholders = ",".join("?" for _ in scan_queue.WAITING_STATUSES)
         waiting_rows = conn.execute(
             "SELECT 'spy' AS scan_type, id, trade_date, kind, created_at, status,"
             " quick_count, quick_total, deep_count, deep_total"
-            " FROM spy_scans WHERE status IN ('running_wait_market', 'running_wait_alloc') ORDER BY created_at"
+            f" FROM spy_scans WHERE status IN ({waiting_placeholders}) ORDER BY created_at",
+            scan_queue.WAITING_STATUSES,
         ).fetchall()
     return {
         "running": dict(running_row) if running_row else None,

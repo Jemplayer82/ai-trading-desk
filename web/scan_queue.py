@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from . import credentials as creds
@@ -34,9 +35,21 @@ log = logging.getLogger(__name__)
 # that reach it directly (each scan thread's `finally`).
 _SCAN_LOCK = threading.RLock()
 
-# dispatch key ("portfolio" | "spy" | "options") -> (module, function name).
+# dispatch key ("portfolio" | "spy" | "options" | "research") -> (module, function name).
 # Populated at import time by whichever route modules the current tier mounts.
 _RUNNERS: dict[str, tuple[Any, str]] = {}
+
+# spy_scans.kind -> dispatch key. Any spy kind not listed here (e.g. 'equity')
+# dispatches to "spy", the equity S&P runner.
+_DISPATCH_KEY_BY_KIND: dict[str, str] = {"options": "options", "research": "research"}
+
+# spy_scans statuses that hold the single compute slot.
+BUSY_STATUSES: tuple[str, ...] = ("pending", "running_quick", "running_deep", "running_alloc")
+
+# Waiting rows are live and heartbeating but do NOT hold the compute slot:
+# a per-account allocation row parked on the shared research row, on the
+# 09:35 ET open, or on the allocation lock.
+WAITING_STATUSES: tuple[str, ...] = ("running_wait_research", "running_wait_market", "running_wait_alloc")
 
 
 def register_runner(key: str, module: Any, func_name: str) -> None:
@@ -47,16 +60,46 @@ def register_runner(key: str, module: Any, func_name: str) -> None:
     _RUNNERS[key] = (module, func_name)
 
 
+def resolve_runner(key: str) -> Callable[[int, str], None] | None:
+    """Return the worker registered under dispatch key ``key``, or None.
+
+    Resolved with a live ``getattr`` at call time (see the module docstring),
+    so a monkeypatched worker attribute is what gets returned. None means no
+    route module registered this key at the current tier.
+    """
+    module, name = _RUNNERS.get(key, (None, None))
+    if module is None:
+        return None
+    return getattr(module, name)
+
+
+def spawn_worker(target: Callable[..., Any], *args: Any):
+    """Start ``target(*args)`` in a daemon thread and return the thread.
+
+    This is THE single place scan workers start. Never use FastAPI
+    BackgroundTasks for scan workers: Starlette runs all of one request's
+    background tasks sequentially, so a request that starts several workers
+    (e.g. research plus N allocations) would run them in series.
+
+    Tests monkeypatch ``scan_queue.spawn_worker`` to run the worker inline or
+    to record the call.
+    """
+    t = threading.Thread(target=target, args=args, daemon=True, name=f"scan-worker-{getattr(target, '__name__', 'worker')}")
+    t.start()
+    return t
+
+
 def _wait_market_release_enabled() -> bool:
     """Whether a 'running_wait_market' scan should be treated as idle (env, read at call time).
 
-    Mirrors options_engine._slot_release_enabled's kill switch
-    byte-for-byte (same env var, same default, same falsy set) rather
-    than importing it: options_engine.py is a tier-4-only module (see
-    scripts/make_tier.py's TIER_ONLY_FILES), while this module ships at
-    every tier >= 2, so an import here would break the tier 2/3 builds
-    that delete options_engine.py entirely. Keep the two functions in
-    sync if the env var name, default, or falsy set ever changes.
+    ``OPTIONS_RELEASE_SLOT_DURING_WAIT`` is an operator switch. Default ("1",
+    or anything outside the falsy set "0"/"false"/"no"/"off", any case) releases
+    the compute slot while a row waits for the 09:35 ET open; a falsy value puts
+    'running_wait_market' back into the busy set in ``_is_any_scan_running``.
+
+    Read here rather than imported from a higher-tier module: this module
+    ships at every tier >= 2 and must not import spy_*, options_* or
+    research_* modules (see scripts/make_tier.py's TIER_ONLY_FILES).
     """
     return os.environ.get("OPTIONS_RELEASE_SLOT_DURING_WAIT", "1").strip().lower() not in {
         "0", "false", "no", "off"
@@ -66,40 +109,38 @@ def _wait_market_release_enabled() -> bool:
 def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     """Return info dict if any scan is actively running, else None.
 
+    Busy means a row in ``BUSY_STATUSES`` (or a portfolio row 'running').
+
     'pending' counts as busy: it's the window between a scan row being created
-    and its worker's first status write, and (for daily options runs) the
-    multi-account loop creates several rows in one request. Without it two
-    back-to-back requests would both see "not busy" and run concurrently. A
-    pending row whose worker never started is closed out by the stuck-run
-    reaper, so it can't wedge the queue.
+    and its worker's first status write, and a single request can create
+    several rows at once. Without it two back-to-back requests would both see
+    "not busy" and run concurrently. A pending row whose worker never started
+    is closed out by the stuck-run reaper, so it can't wedge the queue.
 
-    'running_wait_market' does NOT count as busy BY DEFAULT: a scan parked in
-    ``options_engine._wait_for_market_open()`` sits from ~07:30 to 09:35 ET
-    doing nothing but sleeping in 30s ticks, consuming no LLM budget and no CPU.
-    Counting it busy meant the next queued options account could not begin its
-    compute phase for 25-45 minutes. Serialization of the phase that actually
-    matters — allocation and order placement — is now enforced by
-    ``options_engine._ALLOC_LOCK`` (step 3), not by this busy check.
+    ``WAITING_STATUSES`` rows do NOT count as busy. Per-account allocation rows
+    do no compute: they wait for the shared research row
+    ('running_wait_research'), then for the 09:35 ET open
+    ('running_wait_market'), then serialize on ``research_engine._ALLOC_LOCK``
+    ('running_wait_alloc' / 'running_alloc'). Only 'running_alloc' holds the
+    slot; the waits consume no LLM budget and no CPU, so counting them busy
+    would stall queued work behind them for no reason.
 
-    That default is exactly what ``OPTIONS_RELEASE_SLOT_DURING_WAIT=0`` rolls
-    back (see options_engine._slot_release_enabled): with the switch off,
-    'running_wait_market' goes back into the busy set below, so a container
-    with a parked build reads busy again for the whole ~2h daily wait window —
-    the invariant the kill switch's own docstring names the 4GB-container OOM
-    risk against. ``_wait_market_release_enabled()`` above reads the same env
-    var so this predicate and the proactive dequeue it guards can't disagree.
+    ``OPTIONS_RELEASE_SLOT_DURING_WAIT=0`` remains an operator switch: with it
+    off, 'running_wait_market' goes back into the busy set below, so a
+    container with a parked row reads busy for the whole daily wait window.
+    ``_wait_market_release_enabled()`` reads that env var so this predicate
+    and the proactive dequeue it guards can't disagree.
 
-    Stuck-waiter detection is unaffected: ``db.find_stuck_spy_scans``
-    (web/db.py:1149) keys off ``status NOT IN ('completed','cancelled','failed','queued')``
-    plus a heartbeat-staleness cutoff, entirely independent of this list, so a
+    Stuck-waiter detection is unaffected: ``db.find_stuck_spy_scans`` keys off
+    ``status NOT IN ('completed','cancelled','failed','queued')`` plus a
+    heartbeat-staleness cutoff, entirely independent of this list, so a
     genuinely dead waiter is still reaped.
 
-    The returned dict now also carries the running row's ``status`` and its
-    live progress counters so ``/api/portfolio/status`` is a complete single-row
-    poll target for the Run Analysis progress banner, replacing two ~50-row
-    history-list fetches every 5s.
+    The returned dict also carries the running row's ``status`` and its live
+    progress counters so ``/api/portfolio/status`` is a complete single-row
+    poll target for the Run Analysis progress banner.
     """
-    busy_statuses = ["pending", "running_quick", "running_deep", "running_alloc"]
+    busy_statuses = list(BUSY_STATUSES)
     if not _wait_market_release_enabled():
         busy_statuses.append("running_wait_market")
     placeholders = ",".join("?" for _ in busy_statuses)
@@ -120,8 +161,9 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
 
 def _dequeue_next_scan() -> None:
     """If anything is queued, start the oldest one. Called at the end of every
-    scan thread. spy_scans rows carry kind: 'options' rows run the daily
-    options build, everything else the equity S&P pipeline.
+    scan thread. spy_scans rows carry kind: 'options' rows go to the options
+    runner, 'research' rows to the research runner, everything else to the
+    equity (S&P) runner. Portfolio rows go to the portfolio runner.
 
     Holds _SCAN_LOCK across select-and-claim so two finishing scans (or a
     finishing scan racing the reaper's advance-queue kick) can't both claim
@@ -141,15 +183,10 @@ def _dequeue_next_scan() -> None:
             return
         scan_type, scan_id, trade_date = row["scan_type"], row["id"], row["trade_date"]
         log.info("[queue] starting queued %s scan #%s", scan_type, scan_id)
-        if scan_type == "portfolio":
-            key = "portfolio"
-        elif row["kind"] == "options":
-            key = "options"
-        else:
-            key = "spy"
+        key = "portfolio" if scan_type == "portfolio" else _DISPATCH_KEY_BY_KIND.get(row["kind"], "spy")
 
-        module, func_name = _RUNNERS.get(key, (None, None))
-        if module is None:
+        target = resolve_runner(key)
+        if target is None:
             # Lower tier: the route module owning this scan kind was never
             # imported. Fail the row so it leaves the queue instead of being
             # re-selected forever by the next dequeue.
@@ -171,8 +208,7 @@ def _dequeue_next_scan() -> None:
             db.update_portfolio_scan(scan_id, status="running")
         else:
             db.update_spy_scan(scan_id, status="running_quick")
-        target = getattr(module, func_name)
-    threading.Thread(target=target, args=(scan_id, trade_date), daemon=True).start()
+    spawn_worker(target, scan_id, trade_date)
 
 
 def _advance_queue_if_idle() -> dict[str, Any] | None:
