@@ -8,7 +8,7 @@ No network access. Run with: uv run pytest tests/test_equity_allocation.py -v
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -76,8 +76,20 @@ def env(tmp_db, monkeypatch):
     monkeypatch.setattr(spy_scanner, "fetch_live_prices",
                         lambda t, **k: {"AAA": 50.0, "BBB": 20.0})
 
+    refreshes: list[dict[str, Any]] = []
+    marks: dict[int, Any] = {}
+
     def fake_refresh(scan_id):
+        # Record whether the allocation lock was held and the clock at refresh
+        # time; asserted in the test body so a caller's try/except cannot
+        # swallow the check.
+        refreshes.append({"scan_id": scan_id,
+                          "locked": research_engine._ALLOC_LOCK.locked(),
+                          "now": market_calendar.now_et()})
         events.append(("refresh", scan_id))
+        mark = marks.get(scan_id)
+        if mark is not None:
+            mark(scan_id)
         return {}
 
     monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", fake_refresh)
@@ -93,7 +105,8 @@ def env(tmp_db, monkeypatch):
     # start_allocation copies the account's settings onto the row; mirror that.
     sid = db.create_spy_scan(TD, kind="equity", paper_account_id=acct,
                              aggressiveness=7, bias="bullish")
-    return {"acct": acct, "rid": rid, "sid": sid, "events": events, "run_calls": run_calls}
+    return {"acct": acct, "rid": rid, "sid": sid, "events": events, "run_calls": run_calls,
+            "refreshes": refreshes, "marks": marks}
 
 
 def _prev_scan(acct: int) -> int:
@@ -126,26 +139,95 @@ def test_fresh_account_allocates_research_buys_at_live_prices(env):
     assert ("refresh", env["sid"]) in env["events"]
 
 
+def _mark_prev_up(scan_id: int) -> None:
+    """Fake mark-to-market: BBB 18 -> 22, account value 100,500 -> 100,800."""
+    db.update_spy_scan_prices(scan_id, 100800.0, "marked", [{
+        "ticker": "BBB", "action": "HOLD", "shares": 5, "entry_price": 18.0,
+        "dollar_amount": 90.0, "cost_basis": 90.0,
+        "current_price": 22.0, "current_value": 110.0,
+    }])
+
+
+def _stop_out_prev(scan_id: int) -> None:
+    """Fake mark-to-market that fires BBB's stop: the row becomes EXITED."""
+    db.update_spy_scan_prices(scan_id, 100750.0, "BBB stopped", [{
+        "ticker": "BBB", "action": "EXITED", "shares": 0, "entry_price": 18.0,
+        "dollar_amount": 0.0, "cost_basis": 0.0, "current_value": 0.0,
+    }])
+
+
 def test_rebalances_from_previous_portfolio_marked_after_open(env):
     prev = _prev_scan(env["acct"])
+    env["marks"][prev] = _mark_prev_up
 
     spy_routes._run_equity_allocation(env["sid"], TD)
 
     events = env["events"]
     assert events.index(("refresh", prev)) < events.index(("run",))
     assert events.index(("run",)) < events.index(("refresh", env["sid"]))
+    prev_refresh = next(r for r in env["refreshes"] if r["scan_id"] == prev)
+    assert prev_refresh["locked"], "prev portfolio must be marked inside the allocation lock"
 
     call = env["run_calls"][0]
     tickers = {c["ticker"] for c in call["candidates"]}
     assert tickers == {"AAA", "BBB"}  # BBB is Sell but held, so it reaches the rebalance
     prices = {c["ticker"]: c["entry_price"] for c in call["candidates"]}
     assert prices == {"AAA": 50.0, "BBB": 20.0}
+    # The rebalance starts from the re-read, marked row, not the pre-open copy.
     assert call["previous_portfolio"][0]["ticker"] == "BBB"
-    assert call["starting_value"] == 100500.0
+    assert call["previous_portfolio"][0]["current_price"] == 22.0
+    # Book value: 100,800 marked value minus BBB's +20 unrealized gain.
+    assert call["starting_value"] == pytest.approx(100780.0)
 
     row = db.get_spy_scan(env["sid"])
     assert row["status"] == "completed"
     assert row["previous_scan_id"] == prev
+
+
+def test_stop_exit_in_the_open_mark_reaches_the_rebalance(env):
+    prev = _prev_scan(env["acct"])
+    env["marks"][prev] = _stop_out_prev
+
+    spy_routes._run_equity_allocation(env["sid"], TD)
+
+    prev_refresh = next(r for r in env["refreshes"] if r["scan_id"] == prev)
+    assert prev_refresh["locked"]
+    call = env["run_calls"][0]
+    assert call["previous_portfolio"][0]["action"] == "EXITED"
+    assert call["starting_value"] == pytest.approx(100750.0)
+    # BBB was stopped out, so it is no longer held; as a Sell it drops out.
+    assert [c["ticker"] for c in call["candidates"]] == ["AAA"]
+
+
+def test_trading_day_marks_previous_portfolio_only_after_the_open(env, monkeypatch):
+    td = "2026-09-28"  # a Monday, not an NYSE holiday
+    assert market_calendar.is_trading_day(datetime.fromisoformat(td).date())
+    _seed_research(td)
+    prev = _prev_scan(env["acct"])
+    env["marks"][prev] = _mark_prev_up
+    sid = db.create_spy_scan(td, kind="equity", paper_account_id=env["acct"],
+                             aggressiveness=7, bias="bullish")
+
+    clock = [datetime(2026, 9, 28, 9, 20, tzinfo=market_calendar._ET)]
+    slept: list[float] = []
+
+    def advancing_sleep(seconds):
+        slept.append(seconds)
+        clock[0] = clock[0] + timedelta(seconds=seconds)
+
+    monkeypatch.setattr(market_calendar, "now_et", lambda: clock[0])
+    monkeypatch.setattr(research_engine.time_mod, "sleep", advancing_sleep)
+
+    spy_routes._run_equity_allocation(sid, td)
+
+    assert slept, "the market-open wait must have slept before 09:35"
+    prev_refresh = next(r for r in env["refreshes"] if r["scan_id"] == prev)
+    opened = datetime(2026, 9, 28, *market_calendar.MARKET_OPEN_ET, tzinfo=market_calendar._ET)
+    assert prev_refresh["now"] >= opened, "prev portfolio was marked before the open"
+    assert prev_refresh["locked"]
+    call = env["run_calls"][0]
+    assert call["starting_value"] == pytest.approx(100780.0)
+    assert db.get_spy_scan(sid)["status"] == "completed"
 
 
 def test_no_live_quotes_fails_and_keeps_previous_portfolio(env, monkeypatch):
