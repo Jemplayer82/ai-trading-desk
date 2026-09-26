@@ -216,7 +216,9 @@ _DAILY_REBALANCE_ADDENDUM = (
     "position to HOLD at its current size. EXIT only on a SELL/Underweight rating or "
     "a conviction collapse; open NEW positions only for BUY/Overweight candidates with "
     "conviction ≥ 8; never ADD/TRIM merely to re-weight. Holdings marked 'not re-rated "
-    "today' have NO new signal — HOLD them. Turnover is a cost.\n"
+    "today' have NO new signal — HOLD them. For an existing holding return only HOLD or "
+    "EXITED (ADDED/TRIMMED are treated as HOLD on the daily cadence); use NEW only for "
+    "tickers you do not already hold. Turnover is a cost.\n"
 )
 
 CADENCES = ("weekly", "daily")
@@ -524,6 +526,75 @@ def _fallback_daily(
     return result
 
 
+def _normalize_daily_holdings(
+    allocations: list[dict[str, Any]],
+    previous_portfolio: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Force every live holding to exactly one HOLD or EXITED row (daily cadence).
+
+    ADDED/TRIMMED (and a NEW for a ticker already held) become HOLD: a daily
+    re-size would be priced off the carried original entry_price, not today's
+    quote, and the low-churn policy never re-weights anyway. A holding the
+    model left out entirely is kept as HOLD rather than silently dropped, which
+    would otherwise liquidate it at cost with its P&L erased.
+    """
+    prev_live = {p["ticker"]: p for p in live_positions(previous_portfolio)}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for a in allocations or []:
+        if not isinstance(a, dict) or not a.get("ticker"):
+            continue
+        t = a["ticker"]
+        if t in prev_live:
+            if t in seen:
+                continue  # one row per holding; first decision wins
+            seen.add(t)
+            if a.get("action") != "EXITED":
+                a["action"] = "HOLD"
+        out.append(a)
+    for t, prev in prev_live.items():
+        if t in seen:
+            continue
+        out.append({
+            "ticker": t,
+            "action": "HOLD",
+            "allocation_pct": prev.get("allocation_pct", 0),
+            "dollar_amount": prev.get("dollar_amount", 0),
+            "entry_price": prev.get("entry_price", 0),
+            "rationale": "Not returned by the allocator — held (daily default).",
+        })
+    return out
+
+
+def _realize_daily_exit(
+    row: dict[str, Any],
+    prev: dict[str, Any],
+    live_marks: dict[str, float],
+) -> None:
+    """Fill a daily EXITED row for a live holding at today's mark.
+
+    Mark = today's live quote for the ticker (candidate entry_price), else the
+    previous row's current_price (refreshed at live quotes just before the
+    allocation), else its entry_price. Shares/cost_basis come from the
+    previous holding so apply_stops_and_value can realize proceeds - cost.
+    """
+    shares = int(prev.get("shares") or 0)
+    entry = float(prev.get("entry_price") or 0)
+    cost_basis = prev.get("cost_basis")
+    cost_basis = float(cost_basis) if cost_basis is not None else round(shares * entry, 2)
+    mark = live_marks.get(row["ticker"]) or prev.get("current_price") or entry
+    mark = float(mark or 0)
+    row["entry_price"] = entry
+    row["shares"] = shares
+    row["cost_basis"] = round(cost_basis, 2)
+    row["exit_price"] = round(mark, 2)
+    row["exit_proceeds"] = round(shares * mark, 2)
+    row["current_price"] = row["exit_price"]
+    row["dollar_amount"] = 0
+    row["allocation_pct"] = 0
+    row["exit_reason"] = "allocator"
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def run(
@@ -616,6 +687,11 @@ def run(
     # ── Strip system-owned keys that the LLM or fallback must never author ─────
     _strip_untrusted_keys(allocations)
 
+    # ── Daily cadence: holdings are only ever HOLD or EXITED ──────────────────
+    daily_rebalance = is_rebalance and cadence == "daily"
+    if daily_rebalance:
+        allocations = _normalize_daily_holdings(allocations, previous_portfolio)
+
     # ── Carry forward entry_price and stop-state for retained positions ───────
     if is_rebalance:
         carry_forward_state(allocations, previous_portfolio)
@@ -631,9 +707,25 @@ def run(
             prev_shares = int(p.get("shares") or 0)
             if prev_shares > 0:
                 daily_hold_shares[p["ticker"]] = prev_shares
+    prev_live_map = {p["ticker"]: p for p in live_positions(previous_portfolio)} if daily_rebalance else {}
+    live_marks = {
+        c["ticker"]: float(c["entry_price"])
+        for c in candidates if c.get("ticker") and c.get("entry_price")
+    }
+    realized_today = 0.0
     kept: list[dict[str, Any]] = []
     for a in allocations:
         if a.get("action") == "EXITED":
+            prev = prev_live_map.get(a.get("ticker"))
+            if prev is not None:
+                # Daily exit of a live holding: realize it at today's mark so
+                # its gain/loss survives. The book-value starting capital only
+                # refunds the position's cost; without exit_proceeds the P&L
+                # would silently vanish (see apply_stops_and_value's realized).
+                _realize_daily_exit(a, prev, live_marks)
+                realized_today += float(a["exit_proceeds"]) - float(a["cost_basis"])
+                kept.append(a)
+                continue
             a["shares"] = 0
             a["cost_basis"] = 0.0
             kept.append(a)
@@ -655,7 +747,7 @@ def run(
     allocations = kept
 
     total = sum(a.get("cost_basis", 0) for a in allocations if a.get("action") != "EXITED")
-    cash = max(0.0, capital - total)
+    cash = max(0.0, capital - total + realized_today)
     cash_pct = (cash / capital * 100) if capital else 0.0
 
     # ── Build markdown report ─────────────────────────────────────────────────

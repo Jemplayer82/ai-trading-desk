@@ -32,7 +32,9 @@ EXPECTED_ADDENDUM = (
     "position to HOLD at its current size. EXIT only on a SELL/Underweight rating or "
     "a conviction collapse; open NEW positions only for BUY/Overweight candidates with "
     "conviction ≥ 8; never ADD/TRIM merely to re-weight. Holdings marked 'not re-rated "
-    "today' have NO new signal — HOLD them. Turnover is a cost.\n"
+    "today' have NO new signal — HOLD them. For an existing holding return only HOLD or "
+    "EXITED (ADDED/TRIMMED are treated as HOLD on the daily cadence); use NEW only for "
+    "tickers you do not already hold. Turnover is a cost.\n"
 )
 
 PREVIOUS = [
@@ -336,3 +338,101 @@ def test_daily_message_shows_holding_size_weekly_does_not():
     ) in daily
     assert "held:" not in weekly
     assert "current_value" not in weekly
+
+
+# ── Daily-cadence accounting (close-out review findings) ─────────────────────
+
+def test_daily_exit_realizes_pnl_at_live_mark(monkeypatch):
+    """A daily EXITED holding is closed at today's quote, not at cost."""
+    cands = [
+        {"ticker": "AAPL", "signal": "Underweight", "conviction": 7, "entry_price": 130.0},
+        {"ticker": "MSFT", "signal": "Hold", "conviction": 6, "entry_price": 200.0},
+    ]
+    llm = json.dumps([
+        {"ticker": "AAPL", "action": "EXITED", "dollar_amount": 0, "entry_price": 130.0},
+        {"ticker": "MSFT", "action": "HOLD", "dollar_amount": 10_000, "entry_price": 200.0},
+        # the model trying to author system-owned exit fields must not stick
+        {"ticker": "ZZZ", "action": "NEW", "dollar_amount": 0, "entry_price": 1.0,
+         "exit_proceeds": 1e9},
+    ])
+    _fake_llm(monkeypatch, content=llm)
+    result = _run(cands, PREVIOUS, cadence="daily")
+    rows = {r["ticker"]: r for r in result["allocations"]}
+    aapl = rows["AAPL"]
+    assert aapl["action"] == "EXITED"
+    assert aapl["exit_reason"] == "allocator"
+    assert aapl["shares"] == 100
+    assert aapl["cost_basis"] == 10_000.0
+    assert aapl["exit_price"] == 130.0
+    assert aapl["exit_proceeds"] == 13_000.0
+    # cash = capital - live cost (MSFT 10k) + realized (3k)
+    assert result["cash"] == pytest.approx(100_000 - 10_000 + 3_000)
+
+
+def test_daily_exit_without_live_quote_uses_previous_mark(monkeypatch):
+    prev = [dict(PREVIOUS[0], current_price=90.0), PREVIOUS[1]]
+    _fake_llm(monkeypatch, content=json.dumps([{"ticker": "AAPL", "action": "EXITED"}]))
+    result = _run([], prev, cadence="daily")
+    aapl = next(r for r in result["allocations"] if r["ticker"] == "AAPL")
+    assert aapl["exit_price"] == 90.0
+    assert aapl["exit_proceeds"] == 9_000.0
+
+
+def test_daily_omitted_holding_is_kept_as_hold(monkeypatch):
+    """A holding the model leaves out is held, never silently liquidated at cost."""
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 7, "entry_price": 120.0}]
+    _fake_llm(monkeypatch, content=json.dumps([{"ticker": "AAPL", "action": "HOLD"}]))
+    result = _run(cands, PREVIOUS, cadence="daily")
+    rows = {r["ticker"]: r for r in result["allocations"]}
+    assert rows["MSFT"]["action"] == "HOLD"
+    assert rows["MSFT"]["shares"] == 50
+    assert rows["MSFT"]["cost_basis"] == 10_000.0
+    assert "OLD" not in rows  # previously exited rows are not resurrected
+
+
+@pytest.mark.parametrize("action", ["ADDED", "TRIMMED", "NEW"])
+def test_daily_resize_of_holding_becomes_hold(monkeypatch, action):
+    """Daily re-sizes would price new shares at the carried old cost; they hold instead."""
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 9, "entry_price": 160.0}]
+    llm = json.dumps([{"ticker": "AAPL", "action": action, "dollar_amount": 16_000,
+                       "entry_price": 160.0}])
+    _fake_llm(monkeypatch, content=llm)
+    result = _run(cands, PREVIOUS, cadence="daily")
+    aapl = next(r for r in result["allocations"] if r["ticker"] == "AAPL")
+    assert aapl["action"] == "HOLD"
+    assert aapl["shares"] == 100
+    assert aapl["entry_price"] == 100.0
+    assert aapl["cost_basis"] == 10_000.0
+
+
+def test_weekly_resize_behaviour_unchanged(monkeypatch):
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 9, "entry_price": 160.0}]
+    llm = json.dumps([{"ticker": "AAPL", "action": "ADDED", "dollar_amount": 16_000,
+                       "entry_price": 160.0}])
+    _fake_llm(monkeypatch, content=llm)
+    result = _run(cands, PREVIOUS, cadence="weekly")
+    (aapl,) = [r for r in result["allocations"] if r["ticker"] == "AAPL"]
+    assert aapl["action"] == "ADDED"
+    assert "exit_proceeds" not in aapl
+
+
+def test_daily_exit_gain_survives_the_price_refresh(monkeypatch):
+    """End to end: book-value capital + allocator exit + refresh keeps the gain."""
+    from web import account_policy, spy_scanner
+
+    cands = [
+        {"ticker": "AAPL", "signal": "Sell", "conviction": 7, "entry_price": 130.0},
+        {"ticker": "MSFT", "signal": "Hold", "conviction": 6, "entry_price": 200.0},
+    ]
+    _fake_llm(monkeypatch, content=json.dumps([
+        {"ticker": "AAPL", "action": "EXITED"},
+        {"ticker": "MSFT", "action": "HOLD"},
+    ]))
+    # Book value of PREVIOUS: $80k cash + $20k cost basis.
+    result = _run(cands, PREVIOUS, cadence="daily")
+    market = spy_scanner.apply_stops_and_value(
+        result["allocations"], basis=100_000.0,
+        policy=account_policy.StopPolicy(), prices={"MSFT": 200.0},
+    )
+    assert market["realized"] == pytest.approx(3_000.0)
+    assert market["positions_value"] + market["cash"] == pytest.approx(103_000.0)

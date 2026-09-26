@@ -116,3 +116,54 @@ class TestStartupRecovery:
 
         assert sent == []
         assert kicks == [1]
+
+
+class TestResumeWaitingAllocations:
+    """Rows only waiting (research / open / lock) are re-spawned, not failed."""
+
+    @pytest.fixture()
+    def resume_env(self, startup_env, monkeypatch):
+        spawned: list[tuple] = []
+        runners = {"options": object(), "spy": object()}
+        monkeypatch.setattr(portfolio_main, "_today_et_iso", lambda: TODAY)
+        monkeypatch.setattr(scan_queue, "resolve_runner", lambda key: runners.get(key))
+        monkeypatch.setattr(scan_queue, "spawn_worker", lambda *a: spawned.append(a))
+        return startup_env, spawned, runners
+
+    def test_waiting_allocations_resume_others_fail(self, resume_env):
+        (sent, kicks), spawned, runners = resume_env
+        waiting = {
+            db.create_spy_scan(TODAY, paper_account_id=1, status=s, kind=k): k
+            for s, k in (("running_wait_research", "equity"),
+                         ("running_wait_market", "options"),
+                         ("running_wait_alloc", "options"))
+        }
+        mid_alloc = db.create_spy_scan(TODAY, paper_account_id=2, status="running_alloc",
+                                       kind="options")
+        research = db.create_spy_scan(TODAY, status="running", kind="research")
+        yesterday = db.create_spy_scan("2026-09-24", paper_account_id=3,
+                                       status="running_wait_market", kind="equity")
+
+        portfolio_main._startup()
+
+        assert sorted(a[1] for a in spawned) == sorted(waiting)
+        for target, sid, td in spawned:
+            assert td == TODAY
+            assert target is runners["spy" if waiting[sid] == "equity" else "options"]
+            got = db.get_spy_scan(sid)
+            assert got["status"] == "running_wait_research"
+            assert not got.get("error")
+        for sid in (mid_alloc, research, yesterday):
+            assert db.get_spy_scan(sid)["status"] == "failed"
+        assert len(sent) == 3
+
+    def test_unregistered_runner_falls_back_to_fail(self, resume_env, monkeypatch):
+        (sent, kicks), spawned, runners = resume_env
+        monkeypatch.setattr(scan_queue, "resolve_runner", lambda key: None)
+        sid = db.create_spy_scan(TODAY, paper_account_id=1, status="running_wait_market",
+                                 kind="options")
+
+        portfolio_main._startup()
+
+        assert spawned == []
+        assert db.get_spy_scan(sid)["status"] == "failed"

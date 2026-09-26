@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1246,22 +1246,65 @@ def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def fail_interrupted_spy_scans(error: str) -> list[dict[str, Any]]:
+# Allocation rows parked in these statuses have done nothing irreversible yet
+# (no positions opened, no portfolio written), so a restart can simply re-run
+# them. running_alloc is excluded: it may have partially applied decisions.
+RESUMABLE_ALLOCATION_STATUSES: tuple[str, ...] = (
+    "running_wait_research", "running_wait_market", "running_wait_alloc",
+)
+
+
+def resume_interrupted_allocations(trade_date: str) -> list[dict[str, Any]]:
+    """Reset today's side-effect-free allocation rows to running_wait_research.
+
+    Called at portfolio startup BEFORE fail_interrupted_spy_scans: the returned
+    rows (id, trade_date, kind, paper_account_id) must be re-spawned by the
+    caller. Research rows and anything already in running_alloc are left for
+    the fail sweep.
+    """
+    placeholders = ",".join("?" for _ in RESUMABLE_ALLOCATION_STATUSES)
+    where = (
+        f"status IN ({placeholders}) AND kind IN ('options', 'equity') "
+        "AND paper_account_id IS NOT NULL AND trade_date = ?"
+    )
+    params = [*RESUMABLE_ALLOCATION_STATUSES, trade_date]
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT id, trade_date, kind, paper_account_id FROM spy_scans WHERE {where}",
+            params,
+        ).fetchall()
+        if rows:
+            conn.execute(
+                f"UPDATE spy_scans SET status = 'running_wait_research', updated_at = ? WHERE {where}",
+                [datetime.utcnow().isoformat(timespec="seconds") + "Z", *params],
+            )
+    return [dict(r) for r in rows]
+
+
+def fail_interrupted_spy_scans(error: str, exclude_ids: Iterable[int] = ()) -> list[dict[str, Any]]:
     """Fail every in-flight spy_scans row; return them (pre-update values).
 
     Called at portfolio startup: every spy_scans worker is a thread inside that
     single process, so any row still in flight when it starts is an orphan from
     the previous process. 'queued' rows are left for the queue to dispatch.
+    Run resume_interrupted_allocations first so today's resumable allocation
+    rows are re-spawned instead of failed.
     """
     live = "status NOT IN ('completed', 'cancelled', 'failed', 'queued')"
+    skip = [int(i) for i in exclude_ids]
+    params: list[Any] = []
+    if skip:
+        live += f" AND id NOT IN ({','.join('?' for _ in skip)})"
+        params = skip
     with connect() as conn:
         rows = conn.execute(
-            f"SELECT id, trade_date, kind, status, research_scan_id FROM spy_scans WHERE {live}"
+            f"SELECT id, trade_date, kind, status, research_scan_id FROM spy_scans WHERE {live}",
+            params,
         ).fetchall()
         if rows:
             conn.execute(
                 f"UPDATE spy_scans SET status = 'failed', error = ? WHERE {live}",
-                (error,),
+                [error, *params],
             )
     return [dict(r) for r in rows]
 

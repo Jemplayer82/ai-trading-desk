@@ -77,6 +77,44 @@ def _startup() -> None:
 _INTERRUPTED_ERR = "interrupted — portfolio service restarted while this run was in progress"
 
 
+# Allocation kind -> scan-queue dispatch key (equity allocations run on "spy").
+_ALLOCATION_RUNNER_KEY = {"options": "options", "equity": "spy"}
+
+
+def _today_et_iso() -> str:
+    from . import market_calendar  # tier-agnostic stdlib module
+    return market_calendar.today_et().isoformat()
+
+
+def _resume_interrupted_allocations() -> list[int]:
+    """Re-spawn today's allocation rows that were only waiting when we died.
+
+    A restart between the 09:00 ET allocation kicks and the fills would
+    otherwise fail every account for the day: the per-account cron jobs have
+    already fired and the scheduler only re-kicks research. Rows still waiting
+    for research / the open / the allocation lock have made no changes, and
+    the allocation workers are safe to re-run from the top. Never raises.
+    """
+    try:
+        rows = db.resume_interrupted_allocations(_today_et_iso())
+    except Exception:
+        log.exception("[startup] allocation resume lookup failed")
+        return []
+    resumed: list[int] = []
+    for row in rows:
+        target = scan_queue.resolve_runner(_ALLOCATION_RUNNER_KEY.get(row.get("kind") or "", ""))
+        if target is None:
+            continue  # left in running_wait_research; the fail sweep below closes it
+        try:
+            scan_queue.spawn_worker(target, int(row["id"]), row["trade_date"])
+            resumed.append(int(row["id"]))
+            log.warning("[startup] resumed interrupted %s allocation %s (account %s)",
+                        row.get("kind"), row["id"], row.get("paper_account_id"))
+        except Exception:
+            log.exception("[startup] failed to resume allocation %s", row["id"])
+    return resumed
+
+
 def _recover_interrupted_scans() -> None:
     """Fail spy_scans rows orphaned by a crash/OOM/restart, then kick the queue.
 
@@ -87,8 +125,9 @@ def _recover_interrupted_scans() -> None:
     the 05:30 ET research retry cutoff. Never raises.
     """
     if features.enabled("sp500") or features.enabled("options"):
+        resumed = _resume_interrupted_allocations()
         try:
-            for row in db.fail_interrupted_spy_scans(_INTERRUPTED_ERR):
+            for row in db.fail_interrupted_spy_scans(_INTERRUPTED_ERR, exclude_ids=resumed):
                 kind = row.get("kind")
                 label = {
                     "options": "Options scan",
