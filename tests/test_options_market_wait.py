@@ -36,12 +36,22 @@ def tmp_db(tmp_path, monkeypatch):
     db.init_db()
 
 
-def _seed_research(trade_date: str) -> int:
+def _seed_research(trade_date: str, deep_total: int = 1,
+                   failed_dives: tuple[str, ...] = (), usable: bool = True) -> int:
+    """Seed a completed shared research row. ``deep_total`` is set explicitly
+    (the schema default of 50 would otherwise leak into the zero-candidate
+    reason). AAPL is a successful Buy deep dive when ``usable``; each ticker in
+    ``failed_dives`` is a directional quick row whose deep dive failed (no
+    analysis), so db.list_deep_dived_results excludes it."""
     rid = db.create_spy_scan(trade_date, kind="research")
-    aid = db.create_analysis({"ticker": "AAPL", "trade_date": trade_date})
-    db.complete_analysis(aid, {"final_trade_decision": "Rating: Buy"}, "Buy")
-    db.upsert_spy_quick_result(rid, "AAPL", signal="Buy", conviction=8,
-                               reasoning="r", analysis_id=aid)
+    if usable:
+        aid = db.create_analysis({"ticker": "AAPL", "trade_date": trade_date})
+        db.complete_analysis(aid, {"final_trade_decision": "Rating: Buy"}, "Buy")
+        db.upsert_spy_quick_result(rid, "AAPL", signal="Buy", conviction=8,
+                                   reasoning="r", analysis_id=aid)
+    for t in failed_dives:
+        db.upsert_spy_quick_result(rid, t, signal="Buy", conviction=7, reasoning="r")
+    db.update_spy_scan(rid, deep_total=deep_total)
     db.complete_spy_scan(rid, "research", [])
     return rid
 
@@ -82,8 +92,8 @@ class TestRunOptionsAllocation:
 
         monkeypatch.setattr(options_engine.options_allocator, "run", fake_allocator_run)
 
-    def _run(self, monkeypatch, account_id) -> tuple[int, int, dict[str, Any]]:
-        rid = _seed_research(TD)
+    def _run(self, monkeypatch, account_id, **seed: Any) -> tuple[int, int, dict[str, Any]]:
+        rid = _seed_research(TD, **seed)
         scan_id = db.create_spy_scan(TD, kind="options", paper_account_id=account_id,
                                      status="running_wait_research")
         captured: dict[str, Any] = {}
@@ -125,6 +135,46 @@ class TestRunOptionsAllocation:
 
         assert captured["allocator_kwargs"]["policy"] == StopPolicy("none", None, None)
         assert db.get_spy_scan_status(scan_id)["status"] == "completed"
+
+    # --- zero-candidate reason: n_targets must come from research deep_total ---
+
+    @staticmethod
+    def _why_no_new(scan_id: int) -> str:
+        report = db.get_spy_scan(scan_id)["allocator_report"] or ""
+        assert "## Why no new positions" in report
+        return report.split("## Why no new positions", 1)[1]
+
+    def test_all_deep_dives_failed_is_not_reported_as_quiet_market(self, tmp_db, monkeypatch):
+        # deep_total=3, every dive failed -> usable=[]. n_targets must be 3
+        # (research deep_total), not len(usable)=0, or the report would blame a
+        # quiet market ("Nothing to trade") for a total deep-dive failure.
+        account_id = db.create_paper_account("all-dives-failed", 100_000.0, kind="options")
+        scan_id, _, captured = self._run(monkeypatch, account_id, deep_total=3,
+                                         failed_dives=("MSFT", "NVDA", "TSLA"), usable=False)
+
+        assert captured["fetch_rows"] == []
+        assert db.get_spy_scan_status(scan_id)["status"] == "completed"
+        why = self._why_no_new(scan_id)
+        assert "All 3 deep dives failed" in why
+        assert "Nothing to trade" not in why
+
+    def test_partial_deep_dive_failure_counts_against_research_deep_total(
+            self, tmp_db, monkeypatch):
+        account_id = db.create_paper_account("partial-dives", 100_000.0, kind="options")
+        scan_id, _, _ = self._run(monkeypatch, account_id, deep_total=3,
+                                  failed_dives=("MSFT", "NVDA"))
+
+        why = self._why_no_new(scan_id)
+        assert "1 of 1 deep dives rated a directional call" in why
+        assert "(2 further dives failed and were skipped)" in why
+
+    def test_all_dives_usable_reports_no_further_failures(self, tmp_db, monkeypatch):
+        account_id = db.create_paper_account("all-dives-ok", 100_000.0, kind="options")
+        scan_id, _, _ = self._run(monkeypatch, account_id, deep_total=1)
+
+        why = self._why_no_new(scan_id)
+        assert "1 of 1 deep dives rated a directional call" in why
+        assert "further dives failed" not in why
 
 
 def _advancing_clock(start: datetime, step: timedelta):
