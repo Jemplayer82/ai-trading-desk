@@ -421,7 +421,7 @@
     <section class="main">
       <div class="panel">
         <div class="panel-title">[ Options Paper Trader ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Long calls/puts on S&amp;P 500 movers, 100% simulated. Every weekday: pre-screens the whole S&amp;P 500, quick-scans the top 150 + SPY, deep-dives the top 50 directional names + SPY, then buys/holds/closes single-leg contracts after the open. Auto-runs Mon–Fri 07:30 ET.</p>
+        <p class="dim" style="margin: 0 0 10px;">Long calls/puts on S&amp;P 500 movers, 100% simulated. Each account buys/holds/closes single-leg contracts from the shared daily research. Auto-allocates Mon–Fri at each account's time (default 09:00 ET) from the shared 00:00 research; fills after 09:35 ET.</p>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
           <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
           <select id="opt-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>
@@ -429,8 +429,9 @@
           <span style="flex:1;"></span>
           <span id="opt-account-meta" class="dim" style="font-size:11px;"></span>
         </div>
+        <div style="margin-bottom:10px;font-size:11px;"><span id="opt-research-status" class="dim"></span></div>
         <div class="actions" style="justify-content: flex-start; gap: 10px;">
-          <button id="btn-options-scan" type="button" class="primary">Run Options Scan</button>
+          <button id="btn-options-scan" type="button" class="primary">Allocate now</button>
           <button id="btn-options-stop" type="button" class="ghost" hidden>Stop Scan</button>
           <button id="btn-options-refresh" type="button" class="ghost">Refresh Marks</button>
           <span id="options-scan-status" class="dim" style="margin-left: 4px;"></span>
@@ -476,12 +477,12 @@
                 <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
               </div>
             </label>
-            <label>Scan time (ET)<input type="time" id="opt-new-schedule" style="margin-top:4px;"></label>
+            <label>Allocation time (ET)<input type="time" id="opt-new-schedule" style="margin-top:4px;"></label>
             <label>Stop policy<select id="opt-new-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
             <label id="opt-new-stop-value-wrap" hidden><span id="opt-new-stop-value-label">Stop below entry (%)</span><input type="number" id="opt-new-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
             <label id="opt-new-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="opt-new-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
           </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets the premium budget (5–12% per position, 15–50% total at risk). Bias nudges calls vs puts. A blank scan time means the account only runs when you click Run. Stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order. The options build's own market-open gate still holds allocation until 09:35 ET, so a scan time before the open just queues the build.</p>
+          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets the premium budget (5–12% per position, 15–50% total at risk). Bias nudges calls vs puts. A blank allocation time means the account only allocates when you click Allocate now. Stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order. Allocation waits for today's shared research and the 09:35 ET open before trading.</p>
           <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
             <button type="button" id="btn-create-opt-account" class="primary">Create Account</button>
           </div>

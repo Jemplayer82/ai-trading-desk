@@ -1,8 +1,9 @@
 // TradingAgents Web — "Options" tab (daily options paper trader).
 //
-// Long calls/puts on S&P 500 movers, 100% simulated. Daily pipeline: movers
-// pre-screen -> quick scan (150) -> deep dive (25, BUY and SELL) -> market-open
-// gate -> contract vetting -> LLM allocator with hard guardrails. Positions
+// Long calls/puts on S&P 500 movers, 100% simulated. Each account's daily run
+// is an allocation: it waits for the shared 00:00 ET research (quick scan +
+// deep dives, run once for every account) -> market-open gate (09:35 ET) ->
+// contract vetting -> LLM allocator with hard guardrails. Positions
 // live in normalized tables with an append-only cash ledger — realized P&L is
 // real accounting here, unlike the S&P tab's snapshot portfolio.
 //
@@ -137,7 +138,7 @@ function populateOptAccountForm(acct) {
 
 function resetOptAccountForm() {
   editingOptAccountId = null;
-  populateOptAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "07:30", stop_type: "none", stop_value: null, stop_limit_offset: null });
+  populateOptAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "09:00", stop_type: "none", stop_value: null, stop_limit_offset: null });
   const btn = $("btn-create-opt-account");
   if (btn) btn.textContent = "Create Account";
 }
@@ -394,9 +395,10 @@ async function loadOptionsQueue() {
   if (!ul) return;
   try {
     const data = await apiFetch("/api/portfolio/status");
-    // Options runs are spy_scans rows with kind='options'; only:["options"]
-    // keeps S&P equity runs out of this queue.
-    renderScanQueue(ul, data, { only: ["options"], onOpen: (item) => loadOptionsScan(item.id) });
+    // Options runs are spy_scans rows with kind='options'; the shared daily
+    // research row (kind='research') is shown too because every allocation
+    // waits on it. only:[...] keeps S&P equity allocations out of this queue.
+    renderScanQueue(ul, data, { only: ["options", "research"], onOpen: (item) => loadOptionsScan(item.id) });
   } catch (e) {
     ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(String(e)) + "</li>";
   }
@@ -404,6 +406,7 @@ async function loadOptionsQueue() {
 
 async function loadOptionsHistory() {
   loadOptionsQueue();  // keep queue in sync whenever history refreshes
+  if (typeof loadResearchStatus === "function") loadResearchStatus();
   const ul = $("options-history");
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
@@ -562,18 +565,20 @@ function optBannerHtml(scan) {
     return "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\"><strong>Scan #" + scan.id + " was stopped.</strong> Partial results below.</p></div>";
   }
   if (scan.cancel_requested && scan.status && scan.status.startsWith("running")) {
-    return "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\"><strong>Stopping scan #" + scan.id + "…</strong> In-progress deep dives are finishing; remaining work is skipped.</p></div>";
+    return "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\"><strong>Stopping scan #" + scan.id + "…</strong> In-progress allocation work is finishing; remaining work is skipped.</p></div>";
   }
   return "";
 }
 
 function optProgressHtml(scan) {
   if (!scan || !scan.status || !scan.status.startsWith("running")) return "";
-  const qt = scan.quick_total || 150;
+  const qt = scan.quick_total || 151;
   const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 25;
+  const dt = scan.deep_total || 51;
   const dc = scan.deep_count || 0;
-  const gateNote = scan.status === "running_wait_market"
+  const gateNote = scan.status === "running_wait_research"
+    ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for today's shared research…</p>"
+    : scan.status === "running_wait_market"
     ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for market open (09:35 ET) so entries fill at live quotes.</p>"
     : (scan.status === "running_wait_alloc"
         ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for the allocation slot — another account in this build is still allocating.</p>"
@@ -584,11 +589,11 @@ function optProgressHtml(scan) {
     "<div class=\"panel\">" +
       "<div class=\"panel-title\">[ Progress ]</div>" +
       "<div style=\"margin-bottom:8px;\">" +
-        "<div style=\"margin-bottom:4px;\">Quick scan (movers): " + qc + "/" + qt + "</div>" +
+        "<div style=\"margin-bottom:4px;\">Shared research — quick scan: " + qc + "/" + qt + "</div>" +
         progressBar(qc, qt) +
       "</div>" +
       "<div>" +
-        "<div style=\"margin-bottom:4px;\">Deep dive: " + dc + "/" + dt + "</div>" +
+        "<div style=\"margin-bottom:4px;\">Shared research — deep dives: " + dc + "/" + dt + "</div>" +
         progressBar(dc, dt) +
       "</div>" +
       gateNote +
@@ -803,19 +808,22 @@ async function triggerOptionsScan() {
     return;
   }
   if (btn) btn.disabled = true;
-  if (status) status.textContent = "Starting scan…";
+  if (status) status.textContent = "Queuing allocation…";
   try {
     const r = await fetch("/api/options-scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_id: activeOptAccountId }),
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.status);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // 409 = not a trading day; the route's detail says so.
+      if (status) status.textContent = data.detail || ("Error: " + r.status);
+      return;
+    }
     if (data.error) throw new Error(data.error);
-    const msg = !data.new ? "Scan #" + data.scan_id + " already exists today"
-      : (data.status === "queued" ? "Scan #" + data.scan_id + " queued behind a running scan"
-        : "Scan #" + data.scan_id + " started");
+    const msg = !data.new ? "Allocation #" + data.scan_id + " already exists today"
+      : "Allocation #" + data.scan_id + " queued — waits for today's research and the 09:35 ET open";
     if (status) status.textContent = msg;
     await loadOptionsHistory();
     loadOptionsScan(data.scan_id);
@@ -828,7 +836,7 @@ async function triggerOptionsScan() {
 
 async function triggerOptionsStop() {
   if (!activeOptionsId) return;
-  if (!confirm("Stop options scan #" + activeOptionsId + "?\n\nIn-progress deep dives will finish first. Partial results are kept; no trades are made.")) return;
+  if (!confirm("Stop options scan #" + activeOptionsId + "?\n\nIn-progress allocation work will finish first. Partial results are kept; no trades are made.")) return;
   const btn = $("btn-options-stop");
   const status = $("options-scan-status");
   if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }

@@ -82,6 +82,13 @@ def test_options_account_form_within_tier4():
         _assert_id_in_tier_block(html, id_, 4)
 
 
+def test_options_research_status_within_tier4():
+    html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
+    if not (ROOT / "web/static/options.js").exists():
+        pytest.skip("options.js not present at this tier")
+    _assert_id_in_tier_block(html, "opt-research-status", 4)
+
+
 def test_options_markup_absent_when_options_tier_stripped():
     html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
     if not (ROOT / "web/static/options.js").exists():

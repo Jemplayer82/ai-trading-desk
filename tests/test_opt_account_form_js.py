@@ -185,7 +185,35 @@ def test_reset_form_defaults():
     assert result["type"] == "none"
     assert result["value"] == ""
     assert result["offset"] == ""
-    assert result["schedule"] == "07:30"
+    assert result["schedule"] == "09:00"
+
+
+def test_progress_waiting_for_research_note_and_defaults():
+    result = _run(
+        """
+        return optProgressHtml({status: 'running_wait_research', quick_total: 0, deep_total: 0});
+        """
+    )
+    assert "Waiting for today's shared research" in result
+    assert "0/151" in result
+    assert "0/51" in result
+    assert "pre-screen" not in result.lower()
+
+
+def test_progress_market_and_alloc_notes_still_render():
+    result = _run(
+        """
+        return {
+            market: optProgressHtml({status: 'running_wait_market'}),
+            alloc: optProgressHtml({status: 'running_wait_alloc'}),
+            done: optProgressHtml({status: 'complete'}),
+        };
+        """
+    )
+    assert "09:35 ET" in result["market"]
+    assert "Waiting for today's shared research" not in result["market"]
+    assert "allocation slot" in result["alloc"]
+    assert result["done"] == ""
 
 
 def test_blank_stop_value_blocks_submission():
