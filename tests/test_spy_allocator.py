@@ -1,5 +1,6 @@
 """Unit tests for web/spy_allocator.py's LLM role selection."""
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -114,6 +115,7 @@ def test_daily_unrated_holding_is_hold_not_sell(monkeypatch):
     )
     assert (
         "MSFT | signal: HOLD | conviction: 6/10 | entry_price: $200.00 | "
+        "held: 50 shares, cost basis $10,000.00 | "
         "Not re-rated in today's research — no new signal; default HOLD.\n"
     ) in msg
     assert "MSFT | signal: SELL" not in msg
@@ -243,3 +245,56 @@ def test_invalid_cadence_raises(monkeypatch):
         _run(cands, PREVIOUS, cadence="monthly")
     with pytest.raises(ValueError):
         _run([], None, cadence="hourly")
+
+
+# ─── Daily HOLD keeps its exact size ──────────────────────────────────────────
+
+SIZED_PREVIOUS = [
+    {"ticker": "AAPL", "action": "HOLD", "allocation_pct": 10.0, "dollar_amount": 10_000,
+     "entry_price": 100.0, "shares": 100, "cost_basis": 10_000.0,
+     "current_price": 120.0, "current_value": 12_000.0},
+]
+HOLD_AT_MARKET = json.dumps([
+    {"ticker": "AAPL", "action": "HOLD", "allocation_pct": 12.0, "dollar_amount": 12_000,
+     "entry_price": 120.0, "rationale": "keep"},
+])
+
+
+def test_daily_hold_keeps_previous_share_count(monkeypatch):
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 7, "entry_price": 120.0}]
+    _fake_llm(monkeypatch, content=HOLD_AT_MARKET)
+    result = _run(cands, SIZED_PREVIOUS, cadence="daily")
+    (row,) = result["allocations"]
+    assert row["action"] == "HOLD"
+    assert row["shares"] == 100
+    assert row["entry_price"] == 100.0
+    assert row["cost_basis"] == 10_000.0
+    assert row["dollar_amount"] == 10_000.0
+    assert row["allocation_pct"] == 10.0
+    assert result["total"] == 10_000.0
+
+
+def test_weekly_hold_still_derives_shares_from_dollar_amount(monkeypatch):
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 7, "entry_price": 120.0}]
+    _fake_llm(monkeypatch, content=HOLD_AT_MARKET)
+    result = _run(cands, SIZED_PREVIOUS, cadence="weekly")
+    (row,) = result["allocations"]
+    assert row["shares"] == 120
+    assert row["cost_basis"] == 12_000.0
+
+
+def test_daily_message_shows_holding_size_weekly_does_not():
+    cands = [{"ticker": "AAPL", "signal": "Buy", "conviction": 7, "entry_price": 120.0}]
+    daily = spy_allocator.build_rebalance_user_message(
+        cands, SIZED_PREVIOUS, "2026-09-25", 100_000, cadence="daily"
+    )
+    weekly = spy_allocator.build_rebalance_user_message(
+        cands, SIZED_PREVIOUS, "2026-09-25", 100_000, cadence="weekly"
+    )
+    assert (
+        "AAPL | signal: BUY | conviction: 7/10 | entry_price: $100.00 | "
+        "held: 100 shares, cost basis $10,000.00, current_price $120.00, "
+        "current_value $12,000.00 | "
+    ) in daily
+    assert "held:" not in weekly
+    assert "current_value" not in weekly

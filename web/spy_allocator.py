@@ -250,6 +250,25 @@ PER_TICKER_TEMPLATE = (
     "entry_price: ${entry_price:.2f} | {excerpt}\n"
 )
 
+# Daily-cadence holdings line: same as PER_TICKER_TEMPLATE plus the current
+# size, so the model can actually "HOLD at its current size".
+DAILY_HOLDING_TEMPLATE = (
+    "{ticker} | signal: {signal} | conviction: {conviction}/10 | "
+    "entry_price: ${entry_price:.2f} | {size} | {excerpt}\n"
+)
+
+
+def _holding_size_text(prev: dict[str, Any]) -> str:
+    """Describe a held position's size: shares, cost basis, latest mark if known."""
+    shares = int(prev.get("shares") or 0)
+    entry = float(prev.get("entry_price") or 0)
+    text = f"held: {shares} shares, cost basis ${shares * entry:,.2f}"
+    if prev.get("current_price") is not None:
+        text += f", current_price ${float(prev['current_price']):,.2f}"
+    if prev.get("current_value") is not None:
+        text += f", current_value ${float(prev['current_value']):,.2f}"
+    return text
+
 REBALANCE_STOPPED_HEADER = (
     "\n=== STOPPED OUT SINCE LAST REBALANCE ({n_stopped} positions — closed "
     "automatically by this account's stop policy, NOT by a prior allocation decision) ===\n"
@@ -304,6 +323,16 @@ def build_rebalance_user_message(
             sig = "SELL"
             conv = 0
             excerpt = "No longer in top candidates — consider exiting."
+        if cadence == "daily":
+            user_msg += DAILY_HOLDING_TEMPLATE.format(
+                ticker=prev["ticker"],
+                signal=sig,
+                conviction=conv,
+                entry_price=prev.get("entry_price") or 0.0,
+                size=_holding_size_text(prev),
+                excerpt=excerpt,
+            )
+            continue
         user_msg += PER_TICKER_TEMPLATE.format(
             ticker=prev["ticker"],
             signal=sig,
@@ -582,6 +611,15 @@ def run(
 
     # ── Convert dollar targets into WHOLE shares (real paper-trade fills) ─────
     # shares = floor(target $ / entry price); the rounding remainder stays cash.
+    # Daily cadence: a HOLD of a live holding keeps its exact previous share
+    # count — the LLM's dollar_amount is ignored so a HOLD never silently buys
+    # or sells shares at the carried (old) cost price.
+    daily_hold_shares: dict[str, int] = {}
+    if is_rebalance and cadence == "daily":
+        for p in live_positions(previous_portfolio):
+            prev_shares = int(p.get("shares") or 0)
+            if prev_shares > 0:
+                daily_hold_shares[p["ticker"]] = prev_shares
     kept: list[dict[str, Any]] = []
     for a in allocations:
         if a.get("action") == "EXITED":
@@ -590,8 +628,12 @@ def run(
             kept.append(a)
             continue
         ep = float(a.get("entry_price") or 0)
-        target = float(a.get("dollar_amount") or 0)
-        shares = int(target // ep) if ep > 0 else 0
+        if a.get("action") == "HOLD" and a.get("ticker") in daily_hold_shares:
+            shares = daily_hold_shares[a["ticker"]]
+            a["dollar_amount"] = round(shares * ep, 2)
+        else:
+            target = float(a.get("dollar_amount") or 0)
+            shares = int(target // ep) if ep > 0 else 0
         if shares <= 0:
             # Can't afford a single whole share — that money stays in cash.
             continue
