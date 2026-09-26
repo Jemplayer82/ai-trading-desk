@@ -820,8 +820,10 @@ async function triggerSpyScan() {
 // ===== Shared daily research status =====
 
 // Render today's shared research row into #spy-research-status and, when the
-// Options tab is present, #opt-research-status. Never throws.
-async function loadResearchStatus() {
+// Options tab is present, #opt-research-status. An optional `note` (e.g. the
+// outcome of runResearchNow) is shown ahead of the status so it survives the
+// refresh. Never throws.
+async function loadResearchStatus(note) {
   const targets = ["spy-research-status", "opt-research-status"]
     .map((id) => document.getElementById(id))
     .filter((el) => el);
@@ -848,6 +850,9 @@ async function loadResearchStatus() {
     html = escapeHtml(text);
   } catch (e) {
     html = "<span style=\"color:var(--accent-red);\">Research status unavailable: " + escapeHtml(String(e)) + "</span>";
+  }
+  if (note) {
+    html = "<span style=\"color:var(--accent-yellow);\">" + escapeHtml(String(note)) + "</span> · " + html;
   }
   html += " <button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:2px 8px;\" onclick=\"runResearchNow()\">Run research</button>";
   targets.forEach((el) => { el.innerHTML = html; });
@@ -878,7 +883,9 @@ async function runResearchNow() {
     const el = document.getElementById(id);
     if (el) el.textContent = msg;
   });
-  await loadResearchStatus();
+  // Pass the outcome through so the refresh keeps it visible (e.g. a 409
+  // "not a trading day" detail) instead of overwriting it.
+  await loadResearchStatus(msg);
   return msg;
 }
 

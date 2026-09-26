@@ -47,6 +47,14 @@ globalThis.fetch = function (url, options) {
         return __ok(globalThis.__todayResponse);
     }
     if (url === "/api/research-scan") {
+        if (globalThis.__researchPostStatus) {
+            const st = globalThis.__researchPostStatus;
+            return Promise.resolve({
+                ok: false,
+                status: st,
+                json: function () { return Promise.resolve(globalThis.__researchPostResponse); }
+            });
+        }
         return __ok(globalThis.__researchPostResponse);
     }
     if (url === "/api/spy-scan" && globalThis.__scanPostResponse) {
@@ -201,6 +209,42 @@ def test_run_research_now_posts_research_scan():
     assert result["method"] == "POST"
     assert json.loads(result["body"]) == {}
     assert result["refreshed"] is True
+
+
+def test_run_research_now_409_detail_survives_status_refresh():
+    result = _run(
+        "globalThis.__researchPostStatus = 409;\n"
+        "globalThis.__researchPostResponse = {detail: 'not a trading day <2026-09-26>'};\n"
+        "globalThis.__todayResponse = {trade_date: '2026-09-26', scan: null, attempts: 0};\n"
+        "return (async () => {\n"
+        "    const msg = await runResearchNow();\n"
+        "    return {\n"
+        "        msg: msg,\n"
+        "        html: document.getElementById('spy-research-status').innerHTML,\n"
+        "        refreshed: __calls.some((c) => c.url === '/api/research-scans/today'),\n"
+        "    };\n"
+        "})();"
+    )
+    assert result["msg"] == "not a trading day <2026-09-26>"
+    assert result["refreshed"] is True
+    html = result["html"]
+    assert "not a trading day &lt;2026-09-26&gt;" in html
+    assert "<2026-09-26>" not in html
+    assert "No research yet today" in html
+    assert "runResearchNow()" in html
+
+
+def test_run_research_now_5xx_without_detail_keeps_http_status():
+    result = _run(
+        "globalThis.__researchPostStatus = 503;\n"
+        "globalThis.__researchPostResponse = {};\n"
+        "return (async () => {\n"
+        "    await runResearchNow();\n"
+        "    return document.getElementById('spy-research-status').innerHTML;\n"
+        "})();"
+    )
+    assert "Error: HTTP 503" in result
+    assert "Run research" in result
 
 
 def test_trigger_spy_scan_without_account_makes_no_fetch():
