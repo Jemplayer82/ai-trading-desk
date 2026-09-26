@@ -8,6 +8,7 @@ These tests exercise ``loadResearchTime()`` / ``saveResearchTime()``,
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -68,6 +69,13 @@ globalThis.fetch = function (url, options) {
     return __ok({accounts: [], scans: []});
 };
 """
+
+# options.js is tier-4-only (scripts/make_tier.py deletes it below tier 4) while
+# this file ships at tier 3, so the options cases skip when it is absent.
+_HAS_OPTIONS_JS = (Path(__file__).resolve().parent.parent / "web" / "static" / "options.js").exists()
+needs_options_js = pytest.mark.skipif(
+    not _HAS_OPTIONS_JS, reason="options.js isn't physically present below tier 4"
+)
 
 OPTIONS_BOOTSTRAP = BOOTSTRAP.replace('url === "/api/spy-scan"', 'url === "/api/options-scan"')
 
@@ -299,7 +307,10 @@ def _trigger(kind, response):
     )
 
 
-@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param(k, marks=needs_options_js) if k == "options" else k for k in sorted(TRIGGERS)],
+)
 def test_allocate_now_409_shows_route_detail(kind):
     result = _trigger(kind, {"ok": False, "status": 409, "body": {"detail": NOT_TRADING_DETAIL}})
     assert result["posts"] == 1
@@ -311,7 +322,10 @@ def test_allocate_now_409_shows_route_detail(kind):
     assert result["opened"] == []
 
 
-@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param(k, marks=needs_options_js) if k == "options" else k for k in sorted(TRIGGERS)],
+)
 def test_allocate_now_non_ok_without_detail_shows_http_status(kind):
     result = _trigger(kind, {"ok": False, "status": 500, "body": {}})
     assert result["body"] == {"account_id": 5}
@@ -319,7 +333,10 @@ def test_allocate_now_non_ok_without_detail_shows_http_status(kind):
     assert "500" in result["status"]
 
 
-@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param(k, marks=needs_options_js) if k == "options" else k for k in sorted(TRIGGERS)],
+)
 def test_allocate_now_new_allocation_reports_queued(kind):
     result = _trigger(
         kind, {"ok": True, "status": 200, "body": {"scan_id": 41, "status": "pending", "new": True}}
@@ -333,7 +350,10 @@ def test_allocate_now_new_allocation_reports_queued(kind):
     assert result["opened"] == [41]
 
 
-@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param(k, marks=needs_options_js) if k == "options" else k for k in sorted(TRIGGERS)],
+)
 def test_allocate_now_existing_allocation_is_not_labelled_queued(kind):
     existing = TRIGGERS[kind][4]
     result = _trigger(
@@ -344,6 +364,7 @@ def test_allocate_now_existing_allocation_is_not_labelled_queued(kind):
     assert "queued" not in result["status"]
 
 
+@needs_options_js
 def test_trigger_options_scan_without_account_makes_no_fetch():
     result = _run_options(
         "return (async () => {\n"
