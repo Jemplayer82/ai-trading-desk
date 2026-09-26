@@ -452,8 +452,17 @@ def _previous_portfolio_state(
 
     previous_portfolio is the FULL previous portfolio (including EXITED/stopped
     rows) so the allocator enters rebalance mode. starting_value is the prev
-    scan's last refreshed value, else the sum of its live allocations, else the
-    account's starting_capital. With no prev: (None, None, starting_capital).
+    scan's BOOK value: its last refreshed value minus the unrealized P&L of its
+    live positions (i.e. cash + cost basis), else the sum of its live
+    allocations, else the account's starting_capital. With no prev:
+    (None, None, starting_capital).
+
+    Why book value, not market value: retained HOLD/ADDED/TRIMMED rows keep
+    their original entry_price, so the new scan's cost_basis is at cost and
+    refresh_portfolio_prices derives cash = starting_value - cost_basis. A
+    market-based starting_value would count the unrealized gain once in cash
+    and again in the positions' marks, compounding phantom cash (or phantom
+    losses) on every daily allocation and overstating the allocator's free cash.
     """
     starting_value = float((account or {}).get("starting_capital") or 100_000.0)
     if not prev:
@@ -469,7 +478,13 @@ def _previous_portfolio_state(
     previous_scan_id = int(prev["id"])
     # Use last refreshed value as capital; fall back to sum of live allocations.
     if prev.get("current_value"):
-        starting_value = float(prev["current_value"])
+        unrealized = sum(
+            float(p["current_value"]) - float(p["cost_basis"])
+            for p in spy_allocator.live_positions(prev_portfolio_raw)
+            if p.get("current_value") is not None and p.get("cost_basis") is not None
+            and (p.get("shares") or 0) > 0
+        )
+        starting_value = float(prev["current_value"]) - unrealized
     elif active_prev:
         starting_value = float(sum(
             p.get("dollar_amount", 0) for p in active_prev

@@ -180,3 +180,56 @@ def test_allocation_row_without_account_raises(env):
     sid = db.create_spy_scan(TD, kind="equity", paper_account_id=None)
     with pytest.raises(RuntimeError, match="paper_account_id"):
         spy_routes._run_equity_allocation(sid, TD)
+
+
+# ---------- Book-value capital (no phantom cash from unrealized P&L) ----------
+
+def test_previous_state_starts_from_book_value_not_market_value():
+    prev = {
+        "id": 7,
+        "current_value": 102000.0,
+        "portfolio_json": [
+            {"ticker": "AAA", "action": "HOLD", "shares": 100, "entry_price": 100.0,
+             "dollar_amount": 10000.0, "cost_basis": 10000.0,
+             "current_price": 120.0, "current_value": 12000.0},
+            {"ticker": "BBB", "action": "EXITED", "shares": 0, "entry_price": 50.0,
+             "cost_basis": 0.0, "current_value": 0.0},
+        ],
+    }
+    portfolio, prev_id, starting_value = spy_routes._previous_portfolio_state(
+        prev, {"starting_capital": 100000.0})
+    assert prev_id == 7
+    assert portfolio is prev["portfolio_json"]
+    # The +$2,000 unrealized gain lives in the position's mark, not in cash.
+    assert starting_value == pytest.approx(100000.0)
+
+
+def test_repeated_daily_allocations_do_not_compound_unrealized_pnl(monkeypatch):
+    from web import account_policy
+
+    class _FailingLLM:
+        def invoke(self, _messages):
+            raise RuntimeError("force the deterministic daily fallback")
+
+    monkeypatch.setattr(spy_allocator, "_llm", lambda _config: _FailingLLM())
+    policy = account_policy.StopPolicy.from_account(None)
+    prices = {"AAA": 120.0}
+
+    portfolio = [{"ticker": "AAA", "action": "HOLD", "shares": 100, "entry_price": 100.0,
+                  "allocation_pct": 10.0, "dollar_amount": 10000.0, "cost_basis": 10000.0}]
+    basis = 100000.0
+    values = []
+    for _day in range(4):
+        market = spy_scanner.apply_stops_and_value(
+            portfolio, basis=basis, policy=policy, prices=prices)
+        current_value = market["positions_value"] + market["cash"]
+        values.append(round(current_value, 2))
+        prev = {"id": 1, "portfolio_json": portfolio, "current_value": current_value}
+        previous, _pid, basis = spy_routes._previous_portfolio_state(
+            prev, {"starting_capital": 100000.0})
+        alloc = spy_allocator.run([], "2026-09-28", {}, previous_portfolio=previous,
+                                  starting_value=basis, cadence="daily")
+        portfolio = alloc["allocations"]
+        basis = alloc["starting_value"]
+
+    assert values == [102000.0] * 4
