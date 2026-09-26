@@ -164,10 +164,13 @@ factory and resolves credentials in the order: explicit config → DB credential
   Options scan runs are `spy_scans` rows with `kind='options'`, reusing the equity
   scan's progress/cancel/reaper machinery. Created `0600`.
 - **Shared daily research** (`web/research_engine.py`): each NYSE trading day
-  (`web/market_calendar.py`) gets one `kind='research'` `spy_scans` row — the
-  quick scan + deep dive over the whole S&P 500 — and every paper account's
-  allocation is its own `spy_scans` row (`kind='spy'` or `'options'`) linked to
-  it by `research_scan_id`. Allocation rows wait for that research (status
+  (`web/market_calendar.py`) gets one `kind='research'` `spy_scans` row — a
+  momentum/volume pre-screen of the whole S&P 500, then the quick scan of the
+  top 150 + SPY and the deep dive of the top 50 + SPY — and every paper
+  account's allocation is its own `spy_scans` row (`kind='equity'` or
+  `'options'`; `'spy'` is only the runner dispatch key in
+  `research_engine._RUNNER_KEY`, never a row kind) linked to it by
+  `research_scan_id`. Allocation rows wait for that research (status
   `running_wait_research`) and then for the 09:35 ET open, and run one at a
   time under `research_engine._ALLOC_LOCK`. They never take the compute-queue
   slot (only the research row does), so they bypass the queue; every worker
