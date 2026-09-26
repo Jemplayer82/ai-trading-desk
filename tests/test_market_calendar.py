@@ -24,6 +24,11 @@ def _no_extra_holidays(monkeypatch):
     monkeypatch.delenv("MARKET_HOLIDAYS_EXTRA", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_uncovered_year_warnings(monkeypatch):
+    monkeypatch.setattr(market_calendar, "_warned_uncovered_years", set())
+
+
 def _et(y, m, d, hh=12, mm=0):
     return datetime(y, m, d, hh, mm, tzinfo=market_calendar._ET)
 
@@ -94,3 +99,34 @@ def test_options_data_today_follows_patched_calendar_clock(monkeypatch):
     monkeypatch.setattr(market_calendar, "now_et", lambda: _et(2026, 9, 29, 10, 0))
     assert options_data.today_et() == TUESDAY
     assert options_data.now_et() == _et(2026, 9, 29, 10, 0)
+
+
+_WARN_LOGGER = "web.market_calendar"
+
+
+def _uncovered_warnings(caplog):
+    return [r for r in caplog.records if r.name == _WARN_LOGGER and "NYSE_HOLIDAYS" in r.getMessage()]
+
+
+def test_uncovered_year_warns_once_per_year(caplog):
+    caplog.set_level("WARNING", logger=_WARN_LOGGER)
+    mlk_2028 = date(2028, 1, 17)
+    assert mlk_2028.year > market_calendar.LAST_COVERED_YEAR
+    market_calendar.is_trading_day(mlk_2028)
+    market_calendar.is_trading_day(date(2028, 2, 21))
+    warnings = _uncovered_warnings(caplog)
+    assert len(warnings) == 1
+    assert "2028" in warnings[0].getMessage()
+
+
+def test_covered_year_does_not_warn(caplog):
+    caplog.set_level("WARNING", logger=_WARN_LOGGER)
+    market_calendar.is_trading_day(TUESDAY)
+    market_calendar.is_trading_day(date(2027, 1, 18))
+    assert _uncovered_warnings(caplog) == []
+
+
+def test_holiday_calendar_covers_current_year():
+    """Maintenance guard: fails once the real ET year outruns NYSE_HOLIDAYS.
+    Add the next year's closures from nyse.com/markets/hours-calendars."""
+    assert market_calendar.today_et().year <= market_calendar.LAST_COVERED_YEAR

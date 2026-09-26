@@ -5,7 +5,9 @@ import anything from ``web.*``.
 
 The NYSE holiday list below is hand-maintained from
 https://www.nyse.com/markets/hours-calendars and should be revisited
-annually. The ``MARKET_HOLIDAYS_EXTRA`` env var (comma-separated ISO dates,
+annually. ``is_trading_day`` logs a warning (once per year per process) when
+asked about a year outside ``HOLIDAY_YEARS_COVERED``, and a unit test fails
+once the real ET year passes the last covered year. The ``MARKET_HOLIDAYS_EXTRA`` env var (comma-separated ISO dates,
 read at call time) adds closure dates, e.g. an unscheduled closure; it can
 only add dates, never remove them.
 
@@ -44,6 +46,25 @@ NYSE_HOLIDAYS: frozenset[date] = frozenset({
     date(2027, 11, 25), date(2027, 12, 24),
 })
 
+# Years NYSE_HOLIDAYS is known to be complete for. Outside this range every
+# weekday holiday reads as a trading day, so is_trading_day warns.
+HOLIDAY_YEARS_COVERED: frozenset[int] = frozenset(d.year for d in NYSE_HOLIDAYS)
+LAST_COVERED_YEAR: int = max(HOLIDAY_YEARS_COVERED)
+
+_warned_uncovered_years: set[int] = set()
+
+
+def _warn_if_year_uncovered(year: int) -> None:
+    if year in HOLIDAY_YEARS_COVERED or year in _warned_uncovered_years:
+        return
+    _warned_uncovered_years.add(year)
+    log.warning(
+        "NYSE_HOLIDAYS has no entries for %d (covers %d-%d): weekday holidays will "
+        "be treated as trading days. Update web/market_calendar.py or set "
+        "MARKET_HOLIDAYS_EXTRA.",
+        year, min(HOLIDAY_YEARS_COVERED), LAST_COVERED_YEAR,
+    )
+
 
 def now_et() -> datetime:
     return datetime.now(_ET)
@@ -73,6 +94,7 @@ def is_trading_day(d: date | datetime | None = None) -> bool:
         d = today_et()
     elif isinstance(d, datetime):  # before the date check: datetime subclasses date
         d = d.date()
+    _warn_if_year_uncovered(d.year)
     return d.weekday() < 5 and d not in NYSE_HOLIDAYS and d not in extra_holidays()
 
 
