@@ -539,9 +539,9 @@ function renderSpyScan(scan) {
   // Progress section (only while running)
   let progressHtml = "";
   if (scan.status && scan.status.startsWith("running")) {
-    const qt = scan.quick_total || 151;
+    const qt = scan.quick_total ?? 151;
     const qc = scan.quick_count || 0;
-    const dt = scan.deep_total || 51;
+    const dt = scan.deep_total ?? 51;
     const dc = scan.deep_count || 0;
     // Allocation gates (research -> market open -> allocation slot -> allocate).
     const gateText = {
@@ -837,9 +837,9 @@ async function loadResearchStatus(note) {
       text = "No research yet today";
     } else {
       const qc = scan.quick_count || 0;
-      const qt = scan.quick_total || 151;
+      const qt = scan.quick_total ?? 151;
       const dc = scan.deep_count || 0;
-      const dt = scan.deep_total || 51;
+      const dt = scan.deep_total ?? 51;
       const reused = scan.deep_reused_count || 0;
       text = "Today's research #" + scan.id + " · " + (scan.status || "—") +
         " · quick " + qc + "/" + qt + " · deep " + dc + "/" + dt + " (" + reused + " reused)";

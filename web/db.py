@@ -1094,9 +1094,13 @@ def create_spy_scan(
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
+            # quick_total / deep_total go in as NULL ("not known yet") rather
+            # than the column DEFAULTs (0 / 50), so the UI's 151/51 placeholders
+            # apply until a scan writes its real totals.
             "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, "
-            "paper_account_id, aggressiveness, bias, kind, research_scan_id) "
-            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            "paper_account_id, aggressiveness, bias, kind, research_scan_id, "
+            "quick_total, deep_total) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, NULL, NULL)",
             (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date,
              status, paper_account_id, aggressiveness, bias, kind, research_scan_id),
         )

@@ -712,9 +712,9 @@ function scanActivityPortfolio(scan) {
 }
 
 function scanActivitySpy(scan) {
-  const qt = scan.quick_total || 151;
+  const qt = scan.quick_total ?? 151;
   const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 51;
+  const dt = scan.deep_total ?? 51;
   const dc = scan.deep_count || 0;
   return (
     '<div class="scan-activity-row">' +
@@ -730,9 +730,9 @@ function scanActivitySpy(scan) {
 }
 
 function scanActivityResearch(scan) {
-  const qt = scan.quick_total || 151;
+  const qt = scan.quick_total ?? 151;
   const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 51;
+  const dt = scan.deep_total ?? 51;
   const dc = scan.deep_count || 0;
   return (
     '<div class="scan-activity-row">' +

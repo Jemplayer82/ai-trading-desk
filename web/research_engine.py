@@ -590,9 +590,19 @@ def wait_for_research(scan_id: int, trade_date: str) -> dict[str, Any]:
         if done:
             db.update_spy_scan(scan_id, research_scan_id=done["id"])
             return db.get_spy_scan(done["id"]) or {}
+        newest = db.latest_research_scan(trade_date)
+        if newest:
+            # Mirror the live research counters so the parked row shows real
+            # shared-research progress rather than placeholder totals.
+            db.update_spy_scan(
+                scan_id,
+                quick_count=newest.get("quick_count"),
+                quick_total=newest.get("quick_total"),
+                deep_count=newest.get("deep_count"),
+                deep_total=newest.get("deep_total"),
+            )
         if ticks % 6 == 0:
             db.update_spy_scan(scan_id, status="running_wait_research")  # heartbeat
-            newest = db.latest_research_scan(trade_date)
             log.info("[alloc %s] waiting for research (%s)",
                      scan_id, newest["status"] if newest else "missing")
         if market_calendar.now_et() >= deadline:

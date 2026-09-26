@@ -572,9 +572,9 @@ function optBannerHtml(scan) {
 
 function optProgressHtml(scan) {
   if (!scan || !scan.status || !scan.status.startsWith("running")) return "";
-  const qt = scan.quick_total || 151;
+  const qt = scan.quick_total ?? 151;
   const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 51;
+  const dt = scan.deep_total ?? 51;
   const dc = scan.deep_count || 0;
   const gateNote = scan.status === "running_wait_research"
     ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for today's shared research…</p>"

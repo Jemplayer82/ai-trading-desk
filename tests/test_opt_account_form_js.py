@@ -191,7 +191,7 @@ def test_reset_form_defaults():
 def test_progress_waiting_for_research_note_and_defaults():
     result = _run(
         """
-        return optProgressHtml({status: 'running_wait_research', quick_total: 0, deep_total: 0});
+        return optProgressHtml({status: 'running_wait_research', quick_total: null, deep_total: null});
         """
     )
     assert "Waiting for today's shared research" in result

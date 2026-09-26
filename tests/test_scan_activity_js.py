@@ -268,3 +268,20 @@ return {
         "portfolio": "portfolio",
         "tag": "rsch",
     }
+
+
+def test_zero_deep_total_renders_zero_not_placeholder():
+    script = (
+        "return scanActivityResearch({id: 1, quick_count: 151, quick_total: 151,"
+        " deep_count: 0, deep_total: 0});"
+    )
+    html = run_js(sources=["utils.js", "portfolio.js"], script=script)
+    assert "Deep 0/0" in html
+    assert "0/51" not in html
+
+
+def test_unknown_totals_use_151_51_placeholders():
+    script = "return scanActivitySpy({status: 'running_wait_research'});"
+    html = run_js(sources=["utils.js", "portfolio.js"], script=script)
+    assert "Quick 0/151" in html
+    assert "Deep 0/51" in html

@@ -1016,6 +1016,38 @@ def test_wait_for_research_picks_up_newer_completed_row_after_failure(tmp_db, cl
     assert len(clock.sleeps) == 1
 
 
+def test_create_spy_scan_leaves_totals_unknown(tmp_db):
+    """New rows carry NULL totals, not the column DEFAULTs, so the UI's
+    151/51 placeholders apply until a scan writes its real totals."""
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+    row = db.get_spy_scan(sid)
+    assert row["quick_total"] is None
+    assert row["deep_total"] is None
+
+
+def test_wait_for_research_mirrors_running_research_counters(tmp_db, clock):
+    running = db.create_spy_scan(_ALLOC_TD, kind="research")
+    db.update_spy_scan(running, status="running_deep", quick_count=151,
+                       quick_total=151, deep_count=7, deep_total=51)
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+    seen: list[tuple] = []
+
+    def on_sleep(n):
+        if n == 1:
+            row = db.get_spy_scan(sid)
+            seen.append((row["quick_count"], row["quick_total"],
+                         row["deep_count"], row["deep_total"]))
+            db.complete_spy_scan(running, "r", [])
+
+    clock.on_sleep = on_sleep
+
+    research = research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    assert research["id"] == running
+    assert seen == [(151, 151, 7, 51)]
+    assert len(clock.sleeps) == 1
+
+
 def test_wait_for_research_missing_raises_after_max_wait(tmp_db, clock):
     sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
 
