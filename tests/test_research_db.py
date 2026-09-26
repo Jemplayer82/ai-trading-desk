@@ -42,9 +42,12 @@ def test_latest_research_scan(tmp_db):
     got = db.latest_research_scan(td)
     assert got["id"] == newer
 
-    # completed_only ignores the newer non-completed row.
+    # completed_only returns the older completed row even when a newer
+    # non-completed row exists.
     rid = db.create_spy_scan(td, kind="research", status="running")
     db.complete_spy_scan(rid, "report", [])
+    newest = db.create_spy_scan(td, kind="research", status="running")
+    assert db.latest_research_scan(td)["id"] == newest
     assert db.latest_research_scan(td, completed_only=True)["id"] == rid
 
     # Other dates and other kinds are ignored.
