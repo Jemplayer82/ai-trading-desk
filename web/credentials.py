@@ -144,7 +144,7 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     # TIER:2 END
     # TIER:3 BEGIN
     # Shared daily research start time (Mon-Fri, SCHEDULER_TIMEZONE); read at reconcile time by web/scheduler.py research_time(), so edits apply within ~60 s.
-    {"key": "SCHEDULE_RESEARCH_TIME", "label": "Daily shared research start (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "00:00 — Mon-Fri; the one research pass every paper account allocates from"},  # pragma: allowlist secret
+    {"key": "SCHEDULE_RESEARCH_TIME", "label": "Daily shared research start (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "00:00 — Mon-Fri, must be before 05:30 (runs for that same day); the one research pass every paper account allocates from"},  # pragma: allowlist secret
     # TIER:3 END
 ]
 

@@ -136,8 +136,27 @@ def nightly_scan_time() -> tuple[int, int]:
 
 
 def research_time() -> tuple[int, int]:
-    """Fire time for job_research_scan: DB setting, then env, then 00:00."""
-    return _setting_time(RESEARCH_TIME_SETTING, DEFAULT_RESEARCH_TIME)
+    """Fire time for job_research_scan: DB setting, then env, then 00:00.
+
+    Only 00:00 <= time < RESEARCH_RETRY_CUTOFF_ET (default 05:30 ET) is
+    accepted. Research runs for the trade date it fires on, so an evening
+    setting (e.g. 23:00) would start day D's research after D's allocations
+    already hit their 10:30 deadline and failed, silently skipping trading
+    every day. An out-of-window value logs a warning and yields 00:00.
+    """
+    value = _setting_time(RESEARCH_TIME_SETTING, DEFAULT_RESEARCH_TIME)
+    if value >= RESEARCH_RETRY_CUTOFF_ET:
+        log.warning(
+            "[schedule] %s %02d:%02d is at/after the %02d:%02d ET research cutoff; "
+            "research runs for the day it fires on, so it could not finish before "
+            "that day's allocations. Using default %02d:%02d",
+            RESEARCH_TIME_SETTING,
+            *value,
+            *RESEARCH_RETRY_CUTOFF_ET,
+            *DEFAULT_RESEARCH_TIME,
+        )
+        return DEFAULT_RESEARCH_TIME
+    return value
 
 
 def _apply_db_config() -> None:

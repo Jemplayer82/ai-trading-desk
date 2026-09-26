@@ -117,6 +117,28 @@ def test_research_time_malformed_returns_default(tmp_db):
     assert scheduler.research_time() == (0, 0)
 
 
+def test_research_time_evening_setting_falls_back_to_default(tmp_db):
+    # Research runs for the date it fires on: 23:00 would start day D's
+    # research after D's allocations already failed at the 10:30 deadline.
+    db.set_app_setting(scheduler.RESEARCH_TIME_SETTING, "23:00")
+    assert scheduler.research_time() == (0, 0)
+
+
+def test_research_time_at_cutoff_falls_back_to_default(tmp_db):
+    db.set_app_setting(scheduler.RESEARCH_TIME_SETTING, "05:30")
+    assert scheduler.research_time() == (0, 0)
+
+
+def test_research_time_just_before_cutoff_is_accepted(tmp_db):
+    db.set_app_setting(scheduler.RESEARCH_TIME_SETTING, "05:29")
+    assert scheduler.research_time() == (5, 29)
+
+
+def test_research_time_evening_env_falls_back_to_default(tmp_db, monkeypatch):
+    monkeypatch.setenv(scheduler.RESEARCH_TIME_SETTING, "22:00")
+    assert scheduler.research_time() == (0, 0)
+
+
 # --- per-account reconciler ---
 
 def test_reconcile_creates_equity_job(tmp_db):
