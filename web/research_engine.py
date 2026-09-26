@@ -249,8 +249,7 @@ def wait_for_market_open(scan_id: int) -> None:
     nothing but sleeping — with a single "running_alloc" label the frontend
     couldn't tell "blocked" from "working" and polled the full scan payload
     every 5s for up to 2 hours a day for zero new information. See
-    run_options_build (and the equity worker) for where the label flips back
-    once real work starts.
+    run_allocation for where the label flips back once real work starts.
     """
     ticks = 0
     while True:

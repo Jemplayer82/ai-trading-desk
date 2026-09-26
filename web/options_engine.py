@@ -1,20 +1,19 @@
-"""Daily options paper-trading engine.
+"""Daily options paper-trading engine: per-account allocation.
 
-Pipeline (run_options_build, behind POST /api/options-scan, cron Mon-Fri):
-  settle expiries -> pre-screen the whole S&P 500 by momentum/volume ->
-  quick LLM scan of the top 150 + SPY -> full deep dive on the top DEEP_TOP (50)
-  directional names + SPY (BUY *and* SELL — puts need bearish candidates, unlike
-  the equity scan's BUY/HOLD filter) -> market-open gate -> chain fetch +
-  contract vetting (options_data) -> LLM allocator (options_allocator) ->
-  apply decisions through db's transactional position/ledger helpers.
+The daily research (movers pre-screen, quick scan, deep dives) is shared
+across every account and runs once per NYSE trading day at 00:00 ET in
+``web/research_engine.py``. This module is the per-account options
+allocation that consumes it (run_options_allocation, behind
+POST /api/options-scan, cron Mon-Fri):
+
+  settle expiries -> wait for the shared research -> wait for 09:35 ET ->
+  under the global allocation lock: mark open contracts to market -> chain
+  fetch + contract vetting over the research's usable deep dives
+  (options_data) -> LLM allocator (options_allocator) -> apply decisions
+  through db's transactional position/ledger helpers.
 
 Options runs are spy_scans rows with kind='options', so progress counters,
 cooperative cancel, and the stuck-run reaper all work unchanged.
-
-The pre-screen, target selection, market-open wait and allocation lock now
-live in ``web/research_engine.py`` (shared tier-3 code). This module imports
-them and continues to own the options-specific chain fetching, allocation,
-and position bookkeeping.
 
 Also owns the two standing maintenance passes:
   settle_expired    — idempotent expiry settlement (safety net; the DTE floor
@@ -41,19 +40,9 @@ from . import (
     options_allocator,
     options_data,
     options_learning,
-    spy_scanner,
+    research_engine,
 )
-from .research_engine import (
-    ALWAYS_DEEP,
-    PRESCREEN_TOP,
-    _allocation_slot,
-    _phase,
-    prescreen,
-    select_deep_dive_targets,
-    wait_for_market_open,
-)
-from .runner import build_config
-from .spy_tickers import get_sp500_tickers
+from .research_engine import _phase
 
 log = logging.getLogger(__name__)
 
@@ -498,8 +487,7 @@ def account_summary(paper_account_id: int) -> dict[str, Any]:
 
 def _zero_candidate_reason(
     quick_results: list[dict[str, Any]],
-    directional: list[dict[str, Any]],
-    enriched: list[dict[str, Any]],
+    n_targets: int,
     usable: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
 ) -> str | None:
@@ -510,23 +498,22 @@ def _zero_candidate_reason(
     quiet market. Counts are derived from each stage separately so the text can
     never misattribute a failure as "nothing passed vetting".
 
-    Reachable only when the run was not TOTALLY broken — the guards in
-    run_options_build fail the scan outright in that case.
+    ``n_targets`` is the shared research's deep-dive target count
+    (``deep_total``); ``usable`` is its successfully deep-dived rows
+    (db.list_deep_dived_results, failed dives excluded).
     """
     if candidates:
         return None
     errored_quick = sum(1 for r in quick_results if r.get("error"))
     noise = f" ({errored_quick} of {len(quick_results)} quick scans errored)" if errored_quick else ""
 
-    if not directional:
+    if not n_targets:
         return (f"No ticker in the movers pre-screen scored BUY or SELL today — "
                 f"every name came back HOLD{noise}. Nothing to trade.")
-    if not enriched:
-        return f"{len(directional)} directional signals, but no deep dive ran{noise}."
-    failed = len(enriched) - len(usable)
     if not usable:
-        return (f"All {len(enriched)} deep dives failed{noise}. No contracts were vetted — "
+        return (f"All {n_targets} deep dives failed{noise}. No contracts were vetted — "
                 f"check the analysis history for the underlying error.")
+    failed = max(0, n_targets - len(usable))
     extra = f" ({failed} further dives failed and were skipped)" if failed else ""
     # usable carries each deep dive's OWN final rating (the 5-tier Buy/Overweight/
     # Hold/Underweight/Sell scale — tradingagents/agents/utils/rating.py), which
@@ -539,15 +526,19 @@ def _zero_candidate_reason(
         if (r.get("signal") or "").upper() in options_data._DIRECTION_BY_SIGNAL
     )
     if not directional_final:
-        return (f"{len(usable)} of {len(enriched)} deep dives completed, but every one "
+        return (f"{len(usable)} of {n_targets} deep dives completed, but every one "
                 f"rated Hold after full analysis — no directional call to vet{extra}.")
     return (f"{directional_final} of {len(usable)} deep dives rated a directional call, but no "
             f"contract passed liquidity/delta/DTE vetting{extra} — see the vetting notes below.")
 
 
-def run_options_build(scan_id: int, trade_date: str) -> None:
-    """Worker for one daily options run. Raises on failure (the endpoint's
-    thread wrapper records failed/cancelled status, mirroring the equity scan)."""
+def run_options_allocation(scan_id: int, trade_date: str) -> None:
+    """Worker for one account's daily options allocation. Raises on failure
+    (the endpoint's thread wrapper records failed/cancelled status).
+
+    Settles expiries, then hands off to research_engine.run_allocation, which
+    waits for the shared research and the open and calls ``_allocate`` under
+    the global allocation lock."""
     scan = db.get_spy_scan(scan_id) or {}
     account_id = scan.get("paper_account_id")
     if not account_id:
@@ -556,14 +547,8 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     if not account:
         raise RuntimeError(f"paper account {account_id} not found")
     account_id = int(account_id)
-    aggressiveness = int(scan.get("aggressiveness") or account.get("aggressiveness") or 5)
-    bias = scan.get("bias") or account.get("bias") or "neutral"
     stop_policy = account_policy.StopPolicy.from_account(account)
     log.info("[options %s] stop policy: %s", scan_id, account_policy.describe_policy(stop_policy))
-
-    prefs = db.get_preferences() or {}
-    selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
-    config = build_config({**prefs, "aggressiveness": aggressiveness, "bias": bias})
 
     log.info("[options %s] starting for %s (account %s)", scan_id, trade_date, account_id)
 
@@ -576,69 +561,20 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     with _phase("Expiry settlement failed"):
         settle_expired(account_id)
 
-    # Phase 1: movers pre-screen + quick scan.
-    with _phase("Couldn't fetch the S&P 500 ticker list"):
-        universe = get_sp500_tickers()
-    with _phase("Movers pre-screen failed"):
-        movers = prescreen(universe, PRESCREEN_TOP, trade_date=trade_date)
-    if not movers:
-        raise RuntimeError("Movers pre-screen returned no tickers")
-    # Quick-scan the top 250 movers + SPY (the index gauge, always included).
-    for sym in ALWAYS_DEEP:
-        if sym not in movers:
-            movers.append(sym)
-    log.info("[options %s] quick-scanning %d movers (top %d + %s)",
-             scan_id, len(movers), PRESCREEN_TOP, ",".join(ALWAYS_DEEP))
-    with _phase("Quick scan failed"):
-        quick_results = spy_scanner.run_quick_scan(scan_id, movers, trade_date, config)
-    if db.is_spy_scan_cancelled(scan_id):
-        raise spy_scanner.ScanCancelled()
-    # Wholesale failure must fail the run, not complete green with an empty
-    # portfolio. Checked here rather than inside run_quick_scan because the
-    # equity scan has its own deliberate degrade policy for a bad quick scan.
-    spy_scanner.assert_quick_scan_healthy(quick_results)
+    held = [p["underlying"] for p in db.list_options_positions(account_id, status="open")]
 
-    # Phase 2: deep dive the top directional names — BUY *and* SELL (puts need
-    # bearish candidates; deliberately unlike the equity scan's BUY/HOLD cut).
-    top = select_deep_dive_targets(quick_results)
-    enriched: list[dict[str, Any]] = []
-    if top:
-        with _phase("Deep-dive analysis failed"):
-            enriched = spy_scanner.run_deep_dives(scan_id, top, trade_date, config, selected_analysts)
-        # Quick and deep resolve independent providers/models, so a deep-only
-        # outage passes the quick guard above and lands here.
-        spy_scanner.assert_deep_dives_healthy(enriched)
-    else:
-        log.info("[options %s] no directional quick-scan signals today", scan_id)
-    if db.is_spy_scan_cancelled(scan_id):
-        raise spy_scanner.ScanCancelled()
-
-    # Phase 3: wait for live quotes, then vet contracts and allocate.
-    #
-    # Set to running_wait_market first — wait_for_market_open owns the label
-    # while it's actually blocked, and only flips back to running_alloc the
-    # moment real work resumes below. A run outside the wait window (weekend,
-    # already past open) returns immediately and this line is a no-op status
-    # bounce, not an extra poll cycle.
-    db.update_spy_scan(scan_id, status="running_wait_market")
-    wait_for_market_open(scan_id)
-    with _allocation_slot(scan_id):
-        db.update_spy_scan(scan_id, status="running_alloc")
+    def _allocate(ctx: research_engine.AllocationContext) -> None:
         with _phase("Position mark-to-market failed"):
             refresh_positions(account_id)
 
-        # A FAILED deep dive still carries its quick-scan signal/conviction
-        # (run_deep_dives returns {**candidate, "error": ...}), and fetch_candidates
-        # filters only on signal/conviction — so without this, contracts get vetted
-        # and real paper positions opened off analyses that crashed. Drop them.
-        usable = [e for e in enriched if not e.get("error")]
-        if len(usable) != len(enriched):
-            log.warning("[options %s] dropping %d failed deep dives before vetting",
-                        scan_id, len(enriched) - len(usable))
+        # Research rows come from db.list_deep_dived_results, which already
+        # excludes failed dives; each carries entry_price = the live quote (or
+        # None), which fetch_candidates uses as the chain spot hint.
+        usable = ctx.usable
         with _phase("Chain fetch failed"):
             candidates, chain_notes = options_data.fetch_candidates(usable)
-        log.info("[options %s] %d vetted candidates from %d usable deep dives (%d total)",
-                 scan_id, len(candidates), len(usable), len(enriched))
+        log.info("[options %s] %d vetted candidates from %d usable deep dives (research #%s)",
+                 scan_id, len(candidates), len(usable), ctx.research.get("id"))
 
         open_positions = db.list_options_positions(account_id, status="open")
         eq = account_equity(account_id)
@@ -647,7 +583,7 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         fresh_signals = {
             (r.get("ticker") or "").upper(): {"signal": (r.get("signal") or "").upper(),
                                               "conviction": r.get("conviction")}
-            for r in quick_results if r.get("ticker")
+            for r in ctx.quick_results if r.get("ticker")
         }
 
         # Learning loop, read side: latest batch-reflected lessons + mechanical
@@ -658,10 +594,10 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
             settled = db.list_options_positions(account_id, status="settled")
             last_lesson = db.latest_options_lesson(account_id)
             stats = options_learning.compute_options_stats(
-                settled, min_closed=int(config.get("options_lessons_min_closed", 10)))
+                settled, min_closed=int(ctx.config.get("options_lessons_min_closed", 10)))
             lessons_context = options_learning.format_track_record(
                 stats, (last_lesson or {}).get("lessons_md"),
-                max_chars=int(config.get("options_lessons_max_chars", 1200)))
+                max_chars=int(ctx.config.get("options_lessons_max_chars", 1200)))
             log.info("[options %s] lessons block: %d chars (%d closed)",
                      scan_id, len(lessons_context), len(settled))
         except Exception:
@@ -669,9 +605,9 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
 
         with _phase("Options allocation failed"):
             alloc = options_allocator.run(
-                candidates, open_positions, trade_date, config,
+                candidates, open_positions, ctx.trade_date, ctx.config,
                 equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
-                aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
+                aggressiveness=ctx.aggressiveness, bias=ctx.bias, fresh_signals=fresh_signals,
                 lessons_context=lessons_context, policy=stop_policy,
             )
 
@@ -746,7 +682,8 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
                                   "expiration_date": hp.get("expiration_date")})
 
         report = alloc["report_md"]
-        reason = _zero_candidate_reason(quick_results, top, enriched, usable, candidates)
+        reason = _zero_candidate_reason(ctx.quick_results, int(ctx.research.get("deep_total") or 0),
+                                        usable, candidates)
         if reason:
             report += f"\n## Why no new positions\n{reason}\n"
         if skipped_opens:
@@ -774,3 +711,5 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         log.info("[options %s] done — %d closes / %d opens / %d holds, equity $%s (cash $%s)",
                  scan_id, len(alloc["closes"]), len(alloc["opens"]), len(alloc["holds"]),
                  f"{final['equity']:,.0f}", f"{final['cash']:,.0f}")
+
+    research_engine.run_allocation(scan_id, trade_date, _allocate, extra_tickers=held)

@@ -1,131 +1,176 @@
-"""run_options_build end-to-end: the global allocation lock is held during
-the post-wait phase and released afterward. The market-wait and allocation-
-slot tests now live in tests/test_research_engine.py because their helpers
-were extracted into web/research_engine.py (tier-3 shared code).
+"""run_options_allocation end-to-end over a seeded shared research row: the
+global allocation lock is held during the post-wait phase and released
+afterward, the account's stop policy reaches the allocator, and the research's
+quick rows and live spot hints flow through. The market-wait and allocation-
+slot tests live in tests/test_research_engine.py (tier-3 shared code).
 
 No network access. Run with: uv run pytest tests/test_options_market_wait.py -v
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 
-from web import db, market_calendar, options_engine, research_engine
+from web import (
+    alerts,
+    db,
+    market_calendar,
+    options_engine,
+    options_routes,
+    research_engine,
+    scan_queue,
+    spy_scanner,
+)
 from web.account_policy import StopPolicy
 
 pytestmark = pytest.mark.unit
 
+TD = "2026-06-06"  # a Saturday: the market-open wait returns at once
 
-class TestRunOptionsBuildHoldsAllocationLock:
-    """run_options_build end-to-end: the global allocation lock is held during
-    the post-wait phase and released afterward. Also guards that prescreen
-    is invoked with the keyword-only trade_date argument, and that the
-    account's stop policy is passed to the allocator."""
 
-    def _install_fakes(self, monkeypatch, captured, trade_date):
-        monkeypatch.setattr(options_engine, "get_sp500_tickers", lambda: ["AAPL"])
+@pytest.fixture()
+def tmp_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+    db.init_db()
 
-        def fake_prescreen(tickers, top_n=None, *, trade_date=None):
-            captured["prescreen_trade_date"] = trade_date
-            assert trade_date == trade_date  # keyword-only, asserted below too
-            return ["AAPL"]
 
-        monkeypatch.setattr(options_engine, "prescreen", fake_prescreen)
+def _seed_research(trade_date: str) -> int:
+    rid = db.create_spy_scan(trade_date, kind="research")
+    aid = db.create_analysis({"ticker": "AAPL", "trade_date": trade_date})
+    db.complete_analysis(aid, {"final_trade_decision": "Rating: Buy"}, "Buy")
+    db.upsert_spy_quick_result(rid, "AAPL", signal="Buy", conviction=8,
+                               reasoning="r", analysis_id=aid)
+    db.complete_spy_scan(rid, "research", [])
+    return rid
 
-        def fake_run_quick_scan(scan_id_arg, movers, trade_date_arg, config):
-            return [{"ticker": "AAPL", "signal": "HOLD", "conviction": 1}]
 
-        monkeypatch.setattr(
-            options_engine.spy_scanner, "run_quick_scan", fake_run_quick_scan
-        )
+def _no_sleep(_seconds):
+    raise AssertionError("must not sleep: research is complete and the market wait is a no-op")
 
+
+class TestRunOptionsAllocation:
+    """run_options_allocation end-to-end: lock held during refresh_positions,
+    released after; stop policy passed to the allocator; research linked and
+    copied; live quote used as the chain spot hint."""
+
+    def _install_fakes(self, monkeypatch, captured):
         monkeypatch.setattr(
             market_calendar, "now_et",
             lambda: datetime(2026, 6, 6, 10, 0, tzinfo=market_calendar._ET),
         )
+        monkeypatch.setattr(research_engine.time_mod, "sleep", _no_sleep)
+        monkeypatch.setattr(spy_scanner, "fetch_live_prices", lambda t, **k: {"AAPL": 200.0})
+
+        def fake_fetch_candidates(signals, **kw):
+            captured["fetch_rows"] = [dict(r) for r in signals]
+            return [], []
+
+        monkeypatch.setattr(options_engine.options_data, "fetch_candidates", fake_fetch_candidates)
 
         def fake_refresh_positions(paper_account_id=None):
             captured["lock_during_refresh"] = research_engine._ALLOC_LOCK.locked()
             assert captured["lock_during_refresh"] is True
+            return {}
 
         monkeypatch.setattr(options_engine, "refresh_positions", fake_refresh_positions)
 
         def fake_allocator_run(*args, **kwargs):
             captured["allocator_kwargs"] = kwargs
-            return {
-                "closes": [],
-                "holds": [],
-                "opens": [],
-                "report_md": "test allocation report",
-            }
+            return {"closes": [], "holds": [], "opens": [], "report_md": "x"}
 
         monkeypatch.setattr(options_engine.options_allocator, "run", fake_allocator_run)
 
-    def test_run_options_build_holds_allocation_lock_during_refresh_positions(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
-        db.init_db()
-
-        trade_date = "2026-06-06"
-        account_id = db.create_paper_account("lock-e2e", 100_000.0, "options")
-        scan_id = db.create_spy_scan(
-            trade_date, kind="options", paper_account_id=account_id
-        )
-
+    def _run(self, monkeypatch, account_id) -> tuple[int, int, dict[str, Any]]:
+        rid = _seed_research(TD)
+        scan_id = db.create_spy_scan(TD, kind="options", paper_account_id=account_id,
+                                     status="running_wait_research")
         captured: dict[str, Any] = {}
-        self._install_fakes(monkeypatch, captured, trade_date)
+        self._install_fakes(monkeypatch, captured)
+        options_engine.run_options_allocation(scan_id, TD)
+        return scan_id, rid, captured
 
-        options_engine.run_options_build(scan_id, trade_date)
+    def test_holds_allocation_lock_and_consumes_research(self, tmp_db, monkeypatch):
+        account_id = db.create_paper_account("lock-e2e", 100_000.0, kind="options")
+        scan_id, rid, captured = self._run(monkeypatch, account_id)
 
-        assert captured["prescreen_trade_date"] == trade_date
         assert captured["lock_during_refresh"] is True
         assert not research_engine._ALLOC_LOCK.locked()
         assert db.get_spy_scan_status(scan_id)["status"] == "completed"
 
-    def test_run_options_build_passes_trailing_pct_policy(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
-        db.init_db()
+        row = db.get_spy_scan(scan_id)
+        assert row["research_scan_id"] == rid
+        assert "AAPL" in {r["ticker"] for r in row["quick_results"]}
 
-        trade_date = "2026-06-06"
+        fetched = {r["ticker"]: r for r in captured["fetch_rows"]}
+        assert "AAPL" in fetched
+        assert fetched["AAPL"]["entry_price"] == 200.0
+
+    def test_passes_trailing_pct_policy(self, tmp_db, monkeypatch):
         account_id = db.create_paper_account(
             "policy-trailing", starting_capital=100_000.0,
             kind="options", stop_type="trailing_pct", stop_value=25.0,
         )
-        scan_id = db.create_spy_scan(
-            trade_date, kind="options", paper_account_id=account_id
-        )
-
-        captured: dict[str, Any] = {}
-        self._install_fakes(monkeypatch, captured, trade_date)
-
-        options_engine.run_options_build(scan_id, trade_date)
+        scan_id, _, captured = self._run(monkeypatch, account_id)
 
         assert captured["allocator_kwargs"]["policy"] == StopPolicy("trailing_pct", 25.0, None)
         assert db.get_spy_scan_status(scan_id)["status"] == "completed"
 
-    def test_run_options_build_passes_none_policy_for_defaults(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
-        db.init_db()
-
-        trade_date = "2026-06-06"
+    def test_passes_none_policy_for_defaults(self, tmp_db, monkeypatch):
         account_id = db.create_paper_account(
             "policy-default", starting_capital=100_000.0, kind="options"
         )
-        scan_id = db.create_spy_scan(
-            trade_date, kind="options", paper_account_id=account_id
-        )
-
-        captured: dict[str, Any] = {}
-        self._install_fakes(monkeypatch, captured, trade_date)
-
-        options_engine.run_options_build(scan_id, trade_date)
+        scan_id, _, captured = self._run(monkeypatch, account_id)
 
         assert captured["allocator_kwargs"]["policy"] == StopPolicy("none", None, None)
         assert db.get_spy_scan_status(scan_id)["status"] == "completed"
+
+
+def _advancing_clock(start: datetime, step: timedelta):
+    """now_et fake that moves forward by ``step`` on every call, so a wait
+    loop always reaches its deadline however many other callers read it."""
+    state = {"now": start}
+
+    def _now():
+        cur = state["now"]
+        state["now"] = cur + step
+        return cur
+
+    return _now
+
+
+def test_missing_research_past_deadline_fails_allocation(tmp_db, monkeypatch):
+    td = "2026-06-09"  # a Tuesday
+    account_id = db.create_paper_account("no-research", 100_000.0, kind="options")
+    scan_id = db.create_spy_scan(td, kind="options", paper_account_id=account_id,
+                                 status="running_wait_research")
+    monkeypatch.setenv("RESEARCH_WAIT_MAX_MIN", "1")
+
+    def clock():
+        return _advancing_clock(datetime(2026, 6, 9, 11, 0, tzinfo=market_calendar._ET),
+                                timedelta(minutes=2))
+
+    monkeypatch.setattr(market_calendar, "now_et", clock())
+    monkeypatch.setattr(research_engine.time_mod, "sleep", lambda s: None)
+
+    with pytest.raises(RuntimeError, match="research"):
+        options_engine.run_options_allocation(scan_id, td)
+
+    # The thread wrapper records the failure and advances the queue with the
+    # idle guard (allocation rows never hold the compute slot).
+    monkeypatch.setattr(market_calendar, "now_et", clock())
+    alerts_seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(alerts, "notify_run_failed", lambda **kw: alerts_seen.append(kw))
+    advanced: list[int] = []
+    dequeued: list[int] = []
+    monkeypatch.setattr(scan_queue, "_advance_queue_if_idle", lambda: advanced.append(1))
+    monkeypatch.setattr(scan_queue, "_dequeue_next_scan", lambda: dequeued.append(1))
+    monkeypatch.setattr(scan_queue, "refresh_creds_from_db", lambda: None)
+
+    options_routes._run_options_scan_thread(scan_id, td)
+
+    assert db.get_spy_scan_status(scan_id)["status"] == "failed"
+    assert [a["kind"] for a in alerts_seen] == ["Options allocation"]
+    assert advanced == [1]
+    assert dequeued == []

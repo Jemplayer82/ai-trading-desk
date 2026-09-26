@@ -7,7 +7,11 @@ verbatim.
 
 Options runs are spy_scans rows with kind='options' (same progress/cancel/
 reaper machinery); positions + cash live in their own normalized tables. nginx
-routes /api/options* to the portfolio app via its own location block.
+routes /api/options* to the portfolio app via its own location block. They are
+per-account allocation rows over the shared daily research
+(web/research_engine.py) and bypass the compute queue: they serialize only on
+the global allocation lock, and only the shared research holds the compute
+slot.
 
 Paper-account CRUD is NOT here — it lives in web/spy_routes.py (T3) and serves
 both equity and options accounts, since the tiers are cumulative.
@@ -16,12 +20,11 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 
-from . import alerts, db, options_engine, options_recommend, scan_queue, spy_scanner
+from . import db, market_calendar, options_engine, options_recommend, research_engine, scan_queue
 from .runner import build_config
 
 log = logging.getLogger(__name__)
@@ -30,78 +33,29 @@ router = APIRouter()
 
 
 def _run_options_scan_thread(scan_id: int, trade_date: str) -> None:
-    """Thread entry: route ScanCancelled to 'cancelled', anything else to 'failed'."""
-    scan_queue.refresh_creds_from_db()
-    try:
-        options_engine.run_options_build(scan_id, trade_date)
-    except spy_scanner.ScanCancelled:
-        log.info("Options scan %s cancelled by user", scan_id)
-        db.update_spy_scan(scan_id, status="cancelled")
-    except Exception as exc:
-        log.exception("Options scan %s crashed", scan_id)
-        db.fail_spy_scan(scan_id, str(exc))
-        alerts.notify_run_failed(
-            kind="Options scan", run_id=scan_id, label=trade_date, error=str(exc)
-        )
-    finally:
-        scan_queue._dequeue_next_scan()
+    """Thread entry for one options allocation row (dispatch key 'options').
 
-
-def _start_options_scan_for_account(
-    account: dict[str, Any],
-    today: str,
-    background_tasks: BackgroundTasks,
-    aggressiveness: int | None = None,
-    bias: str | None = None,
-) -> dict[str, Any]:
-    """Idempotent per (account, day): an existing non-failed scan (queued ones
-    included) is returned instead of duplicated, mirroring the equity guard.
-    Joins the scan-serialization queue when anything else is running."""
-    account_id = int(account["id"])
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT id, status FROM spy_scans WHERE trade_date = ? "
-            "AND status NOT IN ('failed', 'cancelled') AND kind = 'options' "
-            "AND paper_account_id = ? ORDER BY id DESC LIMIT 1",
-            (today, account_id),
-        ).fetchone()
-        busy = None if row else scan_queue._is_any_scan_running(conn)
-    if row:
-        return {"scan_id": int(row["id"]), "account_id": account_id,
-                "status": row["status"], "new": False}
-    if busy:
-        scan_id = db.create_spy_scan(
-            today,
-            paper_account_id=account_id,
-            aggressiveness=int(aggressiveness or account.get("aggressiveness") or 5),
-            bias=bias or account.get("bias") or "neutral",
-            status="queued",
-            kind="options",
-        )
-        log.info("[queue] options scan %s queued behind %s scan #%s",
-                 scan_id, busy["scan_type"], busy["id"])
-        return {"scan_id": scan_id, "account_id": account_id,
-                "status": "queued", "new": True, "queued_behind": busy}
-    scan_id = db.create_spy_scan(
-        today,
-        paper_account_id=account_id,
-        aggressiveness=int(aggressiveness or account.get("aggressiveness") or 5),
-        bias=bias or account.get("bias") or "neutral",
-        kind="options",
+    Allocation rows never hold the compute slot, so the shared wrapper uses
+    the idle-guarded queue advance rather than an unguarded dequeue."""
+    research_engine.run_worker(
+        scan_id, trade_date,
+        lambda s, t: options_engine.run_options_allocation(s, t),
+        alert_kind="Options allocation",
+        holds_slot=False,
     )
-    background_tasks.add_task(_run_options_scan_thread, scan_id, today)
-    return {"scan_id": scan_id, "account_id": account_id, "status": "pending", "new": True}
 
 
 @router.post("/api/options-scan")
-async def start_options_scan(
-    body: dict[str, Any] | None = None,
-    background_tasks: BackgroundTasks = None,
-) -> dict[str, Any]:
-    """Trigger the daily options build. Body {account_id} runs one account;
-    omitted (the scheduler's form) runs every options paper account."""
+def start_options_scan(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start today's options allocation. Body {account_id} runs one account;
+    omitted (the scheduler's form) runs every options paper account.
+
+    Each account gets an allocation row that waits for the shared daily
+    research (kicked here if today has none yet). Non-trading days answer
+    409 unless body {force: true}."""
     body = body or {}
-    today = datetime.utcnow().date().isoformat()
+    today = market_calendar.today_et().isoformat()
+    force = bool(body.get("force"))
     account_id = body.get("account_id")
     if account_id:
         try:
@@ -121,13 +75,16 @@ async def start_options_scan(
                 status_code=409,
                 detail="no options paper accounts exist — create one first",
             )
-    results = [
-        _start_options_scan_for_account(
-            a, today, background_tasks,
-            aggressiveness=body.get("aggressiveness"), bias=body.get("bias"),
-        )
-        for a in accounts
-    ]
+    try:
+        results = [
+            research_engine.start_allocation(
+                a, today, "options", force=force,
+                aggressiveness=body.get("aggressiveness"), bias=body.get("bias"),
+            )
+            for a in accounts
+        ]
+    except research_engine.NotTradingDay as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     if len(results) == 1:
         return {**results[0], "scans": results}
     return {"scans": results}

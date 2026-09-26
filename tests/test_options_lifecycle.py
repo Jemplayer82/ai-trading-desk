@@ -371,6 +371,73 @@ def test_dequeue_dispatches_options_rows_to_options_thread(tmp_db, monkeypatch):
     assert started["equity"] == eq
 
 
+# ── POST /api/options-scan: allocation rows over the shared research ────────
+
+@pytest.fixture()
+def options_client(tmp_db, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import web.research_routes  # noqa: F401 — registers the 'research' runner
+    from web import market_calendar, options_routes, scan_queue
+
+    spawns: list[tuple] = []
+    monkeypatch.setattr(scan_queue, "spawn_worker", lambda target, *args: spawns.append((target, args)))
+    monkeypatch.setattr(market_calendar, "today_et", lambda: date(2026, 9, 29))
+    app = FastAPI()
+    app.include_router(options_routes.router)
+    with TestClient(app) as tc:
+        yield tc, spawns
+
+
+def test_options_scan_creates_waiting_allocation_rows(options_client):
+    client, spawns = options_client
+    a1 = db.create_paper_account("Opt A", kind="options")
+    db.create_paper_account("Opt B", kind="options")
+    db.create_paper_account("Opt C", kind="options")
+
+    resp = client.post("/api/options-scan", json={})
+    assert resp.status_code == 200
+    scans = resp.json()["scans"]
+    assert len(scans) == 3
+    assert all(s["status"] == "running_wait_research" and s["new"] for s in scans)
+    for s in scans:
+        row = db.get_spy_scan(s["scan_id"])
+        assert row["kind"] == "options" and row["trade_date"] == "2026-09-29"
+
+    names = [getattr(target, "__name__", "") for target, _ in spawns]
+    assert len(spawns) == 4
+    assert names.count("_run_options_scan_thread") == 3
+    assert db.count_research_attempts("2026-09-29") == 1
+
+    again = client.post("/api/options-scan", json={"account_id": a1})
+    assert again.status_code == 200
+    body = again.json()
+    assert body["new"] is False
+    assert body["scans"][0]["scan_id"] == body["scan_id"]
+    assert len(spawns) == 4
+
+
+def test_options_scan_rejects_equity_account(options_client):
+    client, _ = options_client
+    eq = db.create_paper_account("Equity", kind="equity")
+    resp = client.post("/api/options-scan", json={"account_id": eq})
+    assert resp.status_code == 400
+
+
+def test_options_scan_non_trading_day_needs_force(options_client, monkeypatch):
+    from web import market_calendar
+
+    client, _ = options_client
+    db.create_paper_account("Opt Sat", kind="options")
+    monkeypatch.setattr(market_calendar, "today_et", lambda: date(2026, 9, 26))  # Saturday
+
+    assert client.post("/api/options-scan", json={}).status_code == 409
+    forced = client.post("/api/options-scan", json={"force": True})
+    assert forced.status_code == 200
+    assert forced.json()["scans"][0]["status"] == "running_wait_research"
+
+
 def test_pending_counts_as_busy(tmp_db):
     from web import scan_queue
 
