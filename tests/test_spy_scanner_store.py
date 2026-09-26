@@ -429,6 +429,106 @@ class TestHeartbeat:
         ]
         assert len(heartbeat_calls) >= 2
 
+    def test_deep_heartbeat_carries_live_deep_count(self, tmp_db, monkeypatch, tmp_path):
+        """The deep heartbeat must report the live completed count, not a
+        stale or constant value: once the fast dive lands, beats taken while
+        the slow dive is still in flight report deep_count == 1."""
+        monkeypatch.setattr(spy_scanner, "SCAN_HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr(spy_scanner, "_total_budget", lambda: 2)
+        memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "mem.md")})
+        delays = {"FAST": 0.0, "SLOW": 0.5}
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None, **kw):
+                self.memory_log = memory_log
+
+            def run(self, ticker, trade_date, **kw):
+                time.sleep(delays[ticker])
+                return {"final_trade_decision": "Rating: Buy"}, "BUY"
+
+        monkeypatch.setattr(spy_scanner, "SwitchboardOrchestrator", FakeOrchestrator)
+
+        recorded = []
+        real_update = spy_scanner.db.update_spy_scan
+
+        def recorder(scan_id, **kwargs):
+            recorded.append((threading.current_thread().name, kwargs))
+            return real_update(scan_id, **kwargs)
+
+        monkeypatch.setattr(spy_scanner.db, "update_spy_scan", recorder)
+
+        scan_id = db.create_spy_scan("2026-08-08", kind="options")
+        candidates = [
+            {"ticker": "FAST", "signal": "BUY", "conviction": 8},
+            {"ticker": "SLOW", "signal": "BUY", "conviction": 8},
+        ]
+        spy_scanner.run_deep_dives(
+            scan_id, candidates, "2026-08-08", {"deep_dive_reuse": False}, ["market"],
+        )
+
+        counts = [
+            kw["deep_count"] for name, kw in recorded
+            if name == "scan-heartbeat" and "deep_count" in kw
+        ]
+        assert len(counts) >= 2
+        assert all(isinstance(c, int) and 0 <= c <= len(candidates) for c in counts)
+        assert 1 in counts, f"heartbeat never reported live progress: {counts}"
+
+    def test_heartbeat_touches_scan_during_slow_quick_scan(self, tmp_db, monkeypatch):
+        """run_quick_scan's LLM phase is wrapped in _Heartbeat too; a slow
+        quick scan must keep updated_at fresh with the live quick_count so the
+        stuck-scan reaper cannot kill it."""
+        monkeypatch.setattr(spy_scanner, "SCAN_HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr(spy_scanner, "_total_budget", lambda: 2)
+        monkeypatch.setenv("QUICK_SCAN_BATCH_SIZE", "2")
+        monkeypatch.setattr(spy_scanner, "_llm_quick", lambda cfg: object())
+
+        tickers = ["FA1", "FA2", "SL1", "SL2"]
+        price_map = {
+            t: {
+                "close": [100.0 + j * 0.1 for j in range(25)],
+                "volume": [1000 + j for j in range(25)],
+            }
+            for t in tickers
+        }
+        monkeypatch.setattr(spy_scanner, "_fetch_price_data_map", lambda sid, ts, td: price_map)
+
+        def fake_batch(rows, llm, gate=None):
+            if any(r["ticker"].startswith("SL") for r in rows):
+                time.sleep(0.5)
+            return [
+                {"ticker": r["ticker"], "signal": "BUY", "conviction": 7,
+                 "reasoning": "fake", "entry_price": 100.0}
+                for r in rows
+            ]
+
+        monkeypatch.setattr(spy_scanner, "_quick_scan_batch", fake_batch)
+
+        recorded = []
+        real_update = spy_scanner.db.update_spy_scan
+
+        def recorder(scan_id, **kwargs):
+            recorded.append((threading.current_thread().name, kwargs))
+            return real_update(scan_id, **kwargs)
+
+        monkeypatch.setattr(spy_scanner.db, "update_spy_scan", recorder)
+
+        scan_id = db.create_spy_scan("2026-08-08")
+        results = spy_scanner.run_quick_scan(
+            scan_id, tickers, "2026-08-08", {"quick_scan_reuse": False},
+        )
+        assert sorted(r["ticker"] for r in results) == sorted(tickers)
+
+        counts = [
+            kw["quick_count"] for name, kw in recorded
+            if name == "scan-heartbeat" and "quick_count" in kw
+        ]
+        assert len(counts) >= 2, "quick scan heartbeat never beat"
+        assert all(isinstance(c, int) and 0 <= c <= len(tickers) for c in counts)
+        # The fast batch (2 tickers) lands immediately; beats taken while the
+        # slow batch is in flight must report that live progress.
+        assert 2 in counts, f"heartbeat never reported live progress: {counts}"
+
 
 class TestFetchLivePrices:
     """fetch_live_prices prefers Schwab and falls back to yfinance."""
