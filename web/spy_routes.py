@@ -1,17 +1,17 @@
-"""S&P 500 scanner + paper-account routes — T3 (S&P 500 scanner) only.
+"""S&P 500 paper-account routes + equity allocation worker — T3 (S&P 500 scanner) only.
 
 Split out of web/portfolio_main.py so the portfolio app's shell stays
 byte-identical across every tier branch; portfolio_main.py mounts this router
-only when features.enabled("sp500") is true (see web/features.py). Moved
-verbatim — the _SCAN_LOCK hold spanning busy-check-and-create in start_spy_scan
-and the "/latest/... before /{scan_id}/..." declaration order are both
-load-bearing, do not reorder or simplify them in isolation.
+only when features.enabled("sp500") is true (see web/features.py). The
+"/latest/... before /{scan_id}/..." declaration order is load-bearing; do not
+reorder it.
 
-Owns the S&P pipeline (_run_spy_scan): quick-screen all ~500 tickers, deep-dive
-the top ~50 by conviction, then spy_allocator builds/rebalances a $100k paper
-portfolio. Cancellation is cooperative via spy_scans.cancel_requested. Progress
-contract: quick_count/quick_total + deep_count/deep_total, polled by the
-frontend every 5s.
+There is no weekly S&P pipeline any more. The shared daily research (quick
+screen + deep dives) lives in web/research_engine.py and web/research_routes.py;
+this module owns the per-account EQUITY ALLOCATION worker
+(_run_equity_allocation): it waits for today's research and the open, marks the
+prior portfolio to market at live quotes, then spy_allocator rebalances it with
+cadence="daily". Cancellation is cooperative via spy_scans.cancel_requested.
 
 Also owns paper-account CRUD for BOTH equity and options accounts: tiers are
 cumulative, so T4's options accounts reuse the T3 routes rather than
@@ -25,26 +25,32 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import account_policy, alerts, db, scan_queue, spy_allocator, spy_scanner
+from . import (
+    account_policy,
+    db,
+    market_calendar,
+    research_engine,
+    scan_queue,
+    spy_allocator,
+    spy_scanner,
+)
 from .research_engine import _phase
-from .runner import build_config
-from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# Default auto-run time for a NEW account of each kind, matching the fixed
-# crons the per-account schedules replace.
-_DEFAULT_SCHEDULE_TIME = {"equity": "00:00", "options": "07:30"}
+# The default allocation time for NEW accounts of each kind. The shared
+# research runs at 00:00 ET and allocation fills wait for 09:35 ET, so a 09:00
+# start just queues the account's row to fill at the open.
+_DEFAULT_SCHEDULE_TIME = {"equity": "09:00", "options": "09:00"}
 
 
 def _clean_schedule_time(raw: Any) -> str | None:
@@ -167,70 +173,41 @@ def delete_paper_account(account_id: int) -> dict[str, Any]:
 # ---------- S&P 500 scanner endpoints ----------
 
 @router.post("/api/spy-scan")
-async def start_spy_scan(
-    body: dict[str, Any] | None = None,
-    background_tasks: BackgroundTasks = None,
-) -> dict[str, Any]:
-    """Trigger a full S&P 500 scan. Idempotent for today.
+def start_spy_scan(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start today's equity allocation for one S&P paper account. Idempotent.
 
-    Optional body: {account_id: int} — ties the scan to a paper account and
-    inherits its starting_capital, aggressiveness, and bias settings.
+    Body {account_id: int} is required. The allocation row waits for the
+    shared daily research (kicked here if today has none yet) and fills at
+    live quotes after the open. Non-trading days answer 409 unless
+    body {force: true}. Optional aggressiveness/bias override the account's.
     """
     body = body or {}
-    today = datetime.utcnow().date().isoformat()
-
-    account_id: int | None = body.get("account_id")
-    account: dict[str, Any] | None = None
-    if account_id:
-        account = db.get_paper_account(int(account_id))
-        if not account:
-            raise HTTPException(status_code=404, detail="paper account not found")
-
-    aggressiveness = int(body.get("aggressiveness") or (account or {}).get("aggressiveness") or 5)
-    bias = body.get("bias") or (account or {}).get("bias") or "neutral"
-
-    # Idempotency: don't create a second spy scan for the same account+date unless
-    # the last failed/cancelled. Per-account so different paper accounts can each
-    # have their own scan queued (cross-account concurrency is prevented by the
-    # queue below); the kind filter keeps daily options runs from blocking the
-    # equity scan.
-    with db.connect() as conn:
-        where = "trade_date = ? AND status NOT IN ('failed', 'cancelled') AND kind = 'equity'"
-        params: list[Any] = [today]
-        if account_id:
-            where += " AND paper_account_id = ?"
-            params.append(account_id)
-        else:
-            where += " AND paper_account_id IS NULL"
-        row = conn.execute(
-            f"SELECT id, status FROM spy_scans WHERE {where} ORDER BY id DESC LIMIT 1",
-            params,
-        ).fetchone()
-    if row:
-        return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
-
-    with scan_queue._SCAN_LOCK:  # see start_scan — busy-check + create must be atomic
-        with db.connect() as conn:
-            busy = scan_queue._is_any_scan_running(conn)
-        if busy:
-            scan_id = db.create_spy_scan(
-                today,
-                paper_account_id=account_id,
-                aggressiveness=aggressiveness,
-                bias=bias,
-                status="queued",
-            )
-            log.info("[queue] spy scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
-            return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
-
-        scan_id = db.create_spy_scan(
-            today,
-            paper_account_id=account_id,
-            aggressiveness=aggressiveness,
-            bias=bias,
+    raw_id = body.get("account_id")
+    if raw_id is None or raw_id == "":
+        raise HTTPException(
+            status_code=400,
+            detail="account_id is required — S&P accounts allocate from the shared daily research",
         )
-    background_tasks.add_task(_run_spy_scan_thread, scan_id, today)
-    return {"scan_id": scan_id, "status": "running_quick", "new": True}
+    try:
+        account_id = int(raw_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="account_id must be an integer") from None
+    account = db.get_paper_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    if account.get("kind") != "equity":
+        raise HTTPException(status_code=400, detail="not an equity (S&P) paper account")
+
+    today = market_calendar.today_et().isoformat()
+    try:
+        return research_engine.start_allocation(
+            account, today, "equity",
+            force=bool(body.get("force")),
+            aggressiveness=body.get("aggressiveness"),
+            bias=body.get("bias"),
+        )
+    except research_engine.NotTradingDay as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.get("/api/spy-scans")
@@ -452,147 +429,135 @@ def spy_account_compare() -> dict[str, Any]:
     }
 
 
-# ---------- S&P 500 scan worker ----------
+# ---------- Equity allocation worker ----------
 
 def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
-    """Thread entry: route ScanCancelled to status 'cancelled', anything else to 'failed'."""
-    scan_queue.refresh_creds_from_db()
-    try:
-        _run_spy_scan(scan_id, trade_date)
-    except spy_scanner.ScanCancelled:
-        # A user cancel is not a failure — don't alert.
-        log.info("SPY scan %s cancelled by user", scan_id)
-        db.update_spy_scan(scan_id, status="cancelled")
-    except Exception as exc:
-        log.exception("SPY scan %s crashed", scan_id)
-        db.fail_spy_scan(scan_id, str(exc))
-        alerts.notify_run_failed(
-            kind="S&P 500 scan", run_id=scan_id, label=trade_date, error=str(exc)
-        )
-    finally:
-        scan_queue._dequeue_next_scan()
+    """Thread entry for one equity allocation row (runner key 'spy').
 
-
-def _run_spy_scan(scan_id: int, trade_date: str) -> None:
-    """S&P scan worker: quick scan -> deep dives -> allocator.
-
-    If the previous completed scan left active positions, its last refreshed
-    value becomes this week's starting capital and the allocator runs in
-    rebalance mode; otherwise it's a fresh $100k. The cancel flag is checked
-    between phases here and per-ticker inside spy_scanner.
+    Allocation rows never hold the compute slot, so the shared wrapper uses the
+    idle-guarded queue advance rather than an unguarded dequeue.
     """
-    log.info("[spy %s] starting for %s", scan_id, trade_date)
-    prefs = db.get_preferences() or {}
-    selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
-
-    # Read aggressiveness and bias from the scan row (set at creation from the account).
-    scan_row = db.get_spy_scan(scan_id) or {}
-    aggressiveness = int(scan_row.get("aggressiveness") or 5)
-    bias = scan_row.get("bias") or "neutral"
-    paper_account_id = scan_row.get("paper_account_id")
-
-    config = build_config({**prefs, "aggressiveness": aggressiveness, "bias": bias})
-
-    # Look up the previous completed scan for the same account to enable rebalancing.
-    prev_scan = db.get_latest_completed_spy_scan(
-        exclude_id=scan_id,
-        paper_account_id=paper_account_id,
+    research_engine.run_worker(
+        scan_id, trade_date,
+        lambda s, t: _run_equity_allocation(s, t),
+        alert_kind="S&P 500 allocation",
+        holds_slot=False,
     )
-    previous_portfolio: list[dict[str, Any]] | None = None
-    previous_scan_id: int | None = None
-    starting_value: float = float(
-        (db.get_paper_account(paper_account_id) or {}).get("starting_capital") or 100_000.0
-    ) if paper_account_id else 100_000.0
 
-    if prev_scan:
-        prev_portfolio_raw = prev_scan.get("portfolio_json") or []
-        # Use the full previous portfolio (including EXITED/stopped rows) so the
-        # allocator enters rebalance mode; active_prev is only for fallback capital.
-        active_prev = [
-            p for p in spy_allocator.live_positions(prev_portfolio_raw)
-            if p.get("dollar_amount", 0) > 0
-        ]
-        previous_portfolio = prev_portfolio_raw
-        previous_scan_id = int(prev_scan["id"])
-        # Use last refreshed value as capital; fall back to sum of live allocations.
-        if prev_scan.get("current_value"):
-            starting_value = float(prev_scan["current_value"])
-        elif active_prev:
-            starting_value = float(sum(
-                p.get("dollar_amount", 0) for p in active_prev
-            )) or starting_value
-        log.info(
-            "[spy %s] rebalancing from scan #%s, capital $%s",
-            scan_id, previous_scan_id, f"{starting_value:,.0f}",
+
+def _previous_portfolio_state(
+    prev: dict[str, Any] | None, account: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, int | None, float]:
+    """Return (previous_portfolio, previous_scan_id, starting_value).
+
+    previous_portfolio is the FULL previous portfolio (including EXITED/stopped
+    rows) so the allocator enters rebalance mode. starting_value is the prev
+    scan's last refreshed value, else the sum of its live allocations, else the
+    account's starting_capital. With no prev: (None, None, starting_capital).
+    """
+    starting_value = float((account or {}).get("starting_capital") or 100_000.0)
+    if not prev:
+        return None, None, starting_value
+
+    prev_portfolio_raw = prev.get("portfolio_json") or []
+    # active_prev is only for fallback capital.
+    active_prev = [
+        p for p in spy_allocator.live_positions(prev_portfolio_raw)
+        if p.get("dollar_amount", 0) > 0
+    ]
+    previous_portfolio = prev_portfolio_raw
+    previous_scan_id = int(prev["id"])
+    # Use last refreshed value as capital; fall back to sum of live allocations.
+    if prev.get("current_value"):
+        starting_value = float(prev["current_value"])
+    elif active_prev:
+        starting_value = float(sum(
+            p.get("dollar_amount", 0) for p in active_prev
+        )) or starting_value
+    return previous_portfolio, previous_scan_id, starting_value
+
+
+def _run_equity_allocation(scan_id: int, trade_date: str) -> None:
+    """Daily equity allocation for one paper account over the shared research.
+
+    research_engine.run_allocation waits for today's research and the open,
+    then (under the global allocation lock) fetches live quotes and calls
+    _allocate. The previous portfolio is marked to market first, so stops fire
+    at live quotes and the rebalance starts from today's value. With no live
+    quotes the row fails and the previous scan stays the latest completed one.
+    """
+    scan = db.get_spy_scan(scan_id) or {}
+    pid = scan.get("paper_account_id")
+    if pid is None:
+        raise RuntimeError("equity allocation requires a paper_account_id")
+
+    # kind defaults to equity: the last weekly (Saturday) scan counts, so day
+    # one rebalances from it.
+    prev0 = db.get_latest_completed_spy_scan(exclude_id=scan_id, paper_account_id=pid)
+    held0 = [p["ticker"] for p in spy_allocator.live_positions((prev0 or {}).get("portfolio_json") or [])]
+
+    def _allocate(ctx: research_engine.AllocationContext) -> None:
+        prev = prev0
+        if prev0:
+            # Live marks + stop enforcement at live quotes. Non-fatal.
+            try:
+                r = spy_scanner.refresh_portfolio_prices(int(prev0["id"]))
+                if isinstance(r, dict) and r.get("error"):
+                    log.warning("[spy %s] pre-allocation refresh of scan #%s failed: %s",
+                                scan_id, prev0["id"], r.get("error"))
+            except Exception:
+                log.exception("[spy %s] pre-allocation refresh of scan #%s crashed (non-fatal)",
+                              scan_id, prev0["id"])
+            prev = db.get_spy_scan(int(prev0["id"])) or prev0
+
+        previous_portfolio, previous_scan_id, starting_value = _previous_portfolio_state(prev, ctx.account)
+        if prev:
+            log.info(
+                "[spy %s] rebalancing from scan #%s, capital $%s",
+                scan_id, previous_scan_id, f"{starting_value:,.0f}",
+            )
+
+        held = {p["ticker"].upper() for p in spy_allocator.live_positions(previous_portfolio or [])}
+        if (ctx.usable or held) and not ctx.live_prices:
+            raise RuntimeError("no live quotes at the open — allocation skipped; holdings unchanged")
+
+        candidates = research_engine.equity_candidates(ctx.usable, held)
+        if not candidates and not held:
+            raise RuntimeError(
+                "no priced Buy/Overweight/Hold candidates and nothing held — nothing to allocate today")
+
+        with _phase("Portfolio allocation failed"):
+            alloc = spy_allocator.run(
+                candidates,
+                ctx.trade_date,
+                ctx.config,
+                previous_portfolio=previous_portfolio,
+                starting_value=starting_value,
+                aggressiveness=ctx.aggressiveness,
+                bias=ctx.bias,
+                cadence="daily",
+            )
+        portfolio = alloc.get("allocations", [])
+
+        db.complete_spy_scan(
+            scan_id=scan_id,
+            allocator_report=alloc.get("report_md", ""),
+            portfolio_json=portfolio,
+            previous_scan_id=previous_scan_id,
+            starting_value=alloc.get("starting_value", starting_value),
         )
+        log.info("[spy %s] done — %d positions, capital $%s → deployed $%s", scan_id,
+                 len(spy_allocator.live_positions(portfolio)),
+                 f"{starting_value:,.0f}", f"{alloc.get('total', 0):,.0f}")
 
-    # Phase 1: quick scan all S&P 500
-    with _phase("Couldn't fetch the S&P 500 ticker list"):
-        tickers = get_sp500_tickers()
-    with _phase("Quick scan failed"):
-        quick_results = spy_scanner.run_quick_scan(scan_id, tickers, trade_date, config)
+        # Mark the fresh portfolio to market immediately so the table shows live
+        # share counts / current prices / P&L without waiting for the hourly cron.
+        try:
+            spy_scanner.refresh_portfolio_prices(scan_id)
+        except Exception:
+            log.exception("[spy %s] initial price refresh failed (non-fatal)", scan_id)
 
-    if db.is_spy_scan_cancelled(scan_id):
-        raise spy_scanner.ScanCancelled()
-    # Half or more of the quick scans erroring is infrastructure, not a quiet
-    # market — fail rather than "degrade" into building a portfolio out of
-    # error rows. This sits ABOVE the least-bad-50 fallback below on purpose:
-    # that fallback exists for a pathological but WORKING scan, not a dead one.
-    spy_scanner.assert_quick_scan_healthy(quick_results)
-
-    # Phase 2: deep dive top 50 by conviction
-    buy_or_hold = [r for r in quick_results if (r.get("signal") or "").upper() in ("BUY", "HOLD")]
-    top50 = sorted(buy_or_hold, key=lambda r: -(r.get("conviction") or 0))[:50]
-    if not top50:
-        # Pathological quick scan (everything SELL or errored): deep-dive the
-        # least-bad 50 anyway rather than abort the whole weekly run.
-        top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
-    with _phase("Deep-dive analysis failed"):
-        enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
-    spy_scanner.assert_deep_dives_healthy(enriched)
-
-    if db.is_spy_scan_cancelled(scan_id):
-        raise spy_scanner.ScanCancelled()
-
-    # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh capital)
-    db.update_spy_scan(scan_id, status="running_alloc")
-    # A failed dive keeps its quick-scan signal/conviction (run_deep_dives
-    # returns {**candidate, "error": ...}) and the allocator never inspects
-    # `error` — so unfiltered, a partial deep-dive outage gets equal-weighted
-    # into the paper portfolio at a fabricated entry_price. Drop those rows.
-    usable = [e for e in enriched if not e.get("error")]
-    if len(usable) != len(enriched):
-        log.warning("[spy %s] dropping %d failed deep dives before allocation",
-                    scan_id, len(enriched) - len(usable))
-    with _phase("Portfolio allocation failed"):
-        alloc_result = spy_allocator.run(
-            usable,
-            trade_date,
-            config,
-            previous_portfolio=previous_portfolio,
-            starting_value=starting_value,
-            aggressiveness=aggressiveness,
-            bias=bias,
-        )
-    portfolio = alloc_result.get("allocations", [])
-
-    db.complete_spy_scan(
-        scan_id=scan_id,
-        allocator_report=alloc_result.get("report_md", ""),
-        portfolio_json=portfolio,
-        previous_scan_id=previous_scan_id,
-        starting_value=alloc_result.get("starting_value", starting_value),
-    )
-    log.info("[spy %s] done — %d positions, capital $%s → deployed $%s", scan_id,
-             len(spy_allocator.live_positions(portfolio)),
-             f"{starting_value:,.0f}", f"{alloc_result.get('total', 0):,.0f}")
-
-    # Mark the fresh portfolio to market immediately so the table shows live
-    # share counts / current prices / P&L without waiting for the hourly cron.
-    try:
-        spy_scanner.refresh_portfolio_prices(scan_id)
-    except Exception:
-        log.exception("[spy %s] initial price refresh failed (non-fatal)", scan_id)
+    research_engine.run_allocation(scan_id, trade_date, _allocate, extra_tickers=held0)
 
 
 # ---------- Scan-queue registration ----------

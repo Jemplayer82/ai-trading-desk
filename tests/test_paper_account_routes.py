@@ -1,17 +1,36 @@
+from datetime import date
+from typing import Any
+
 import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web import db, spy_routes, spy_scanner
+import web.research_routes  # noqa: F401  (registers the 'research' runner)
+from web import db, market_calendar, scan_queue, spy_routes, spy_scanner
 
 pytestmark = pytest.mark.unit
+
+_TODAY = date(2026, 9, 29)  # a Tuesday (NYSE trading day)
 
 
 @pytest.fixture(autouse=True)
 def _no_yfinance_network(monkeypatch):
     """Disable real yfinance downloads; tests inject prices via Schwab."""
     monkeypatch.setattr(spy_scanner.yf, "download", lambda *a, **k: pd.DataFrame())
+
+
+@pytest.fixture(autouse=True)
+def spawn_calls(monkeypatch):
+    """Record worker spawns instead of starting threads; pin the ET date."""
+    calls: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def recorder(target, *args):
+        calls.append((target, args))
+
+    monkeypatch.setattr(scan_queue, "spawn_worker", recorder)
+    monkeypatch.setattr(market_calendar, "today_et", lambda: _TODAY)
+    return calls
 
 
 @pytest.fixture()
@@ -115,12 +134,12 @@ def test_reject_stop_value_abc(client):
 
 def test_default_schedule_time_equity(client):
     acct = _create_account(client, name="eq-default")
-    assert acct["schedule_time"] == "00:00"
+    assert acct["schedule_time"] == "09:00"
 
 
 def test_default_schedule_time_options(client):
     acct = _create_account(client, name="opt-default", kind="options")
-    assert acct["schedule_time"] == "07:30"
+    assert acct["schedule_time"] == "09:00"
 
 
 def test_schedule_time_roundtrip(client):
@@ -415,3 +434,88 @@ def test_latest_refresh_prices_500s_and_alerts_when_yfinance_download_fails_in_r
     for entry in scans.values():
         assert entry == {"error": yf_error_message}
     assert len(captured_alerts) == 1
+
+# ---------- POST /api/spy-scan (daily equity allocation) ----------
+
+def _completed_research(td: str = "2026-09-29") -> int:
+    rid = db.create_spy_scan(td, kind="research")
+    db.complete_spy_scan(rid, "r", [])
+    return rid
+
+
+def test_spy_scan_requires_account_id(client, spawn_calls):
+    resp = client.post("/api/spy-scan", json={})
+    assert resp.status_code == 400
+    assert "account_id" in resp.json()["detail"]
+    assert spawn_calls == []
+
+
+def test_spy_scan_non_int_account_id_400(client):
+    resp = client.post("/api/spy-scan", json={"account_id": "abc"})
+    assert resp.status_code == 400
+
+
+def test_spy_scan_unknown_account_404(client):
+    resp = client.post("/api/spy-scan", json={"account_id": 9999})
+    assert resp.status_code == 404
+
+
+def test_spy_scan_rejects_options_account(client, spawn_calls):
+    acct = _create_account(client, name="opt-acct", kind="options")
+    resp = client.post("/api/spy-scan", json={"account_id": acct["id"]})
+    assert resp.status_code == 400
+    assert spawn_calls == []
+
+
+def test_spy_scan_non_trading_day_409_unless_forced(client, monkeypatch, spawn_calls):
+    monkeypatch.setattr(market_calendar, "today_et", lambda: date(2026, 9, 26))  # Saturday
+    acct = _create_account(client, name="sat-acct")
+
+    resp = client.post("/api/spy-scan", json={"account_id": acct["id"]})
+    assert resp.status_code == 409
+    assert spawn_calls == []
+
+    resp = client.post("/api/spy-scan", json={"account_id": acct["id"], "force": True})
+    assert resp.status_code == 200
+    assert resp.json()["new"] is True
+
+
+def test_spy_scan_with_completed_research_spawns_allocation_only(client, spawn_calls):
+    rid = _completed_research()
+    acct = _create_account(client, name="eq-alloc")
+
+    resp = client.post("/api/spy-scan", json={"account_id": acct["id"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "running_wait_research"
+    assert body["new"] is True
+
+    row = db.get_spy_scan(body["scan_id"])
+    assert row["kind"] == "equity"
+    assert row["paper_account_id"] == acct["id"]
+    assert row["research_scan_id"] == rid
+
+    assert len(spawn_calls) == 1
+    target, args = spawn_calls[0]
+    assert target.__name__ == "_run_spy_scan_thread"
+    assert args == (body["scan_id"], "2026-09-29")
+
+    again = client.post("/api/spy-scan", json={"account_id": acct["id"]})
+    assert again.status_code == 200
+    assert again.json()["new"] is False
+    assert again.json()["scan_id"] == body["scan_id"]
+    assert len(spawn_calls) == 1
+
+
+def test_spy_scan_without_research_kicks_research(client, spawn_calls):
+    acct = _create_account(client, name="eq-kick")
+
+    resp = client.post("/api/spy-scan", json={"account_id": acct["id"]})
+    assert resp.status_code == 200
+    assert resp.json()["new"] is True
+
+    research = db.latest_research_scan("2026-09-29")
+    assert research is not None
+    assert len(spawn_calls) == 2
+    names = sorted(t.__name__ for t, _ in spawn_calls)
+    assert "_run_spy_scan_thread" in names

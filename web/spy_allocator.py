@@ -1,6 +1,6 @@
 """LLM allocator: 50 deep-dive results → $100k paper portfolio (or weekly rebalance).
 
-Phase 3 of the S&P pipeline (web/portfolio_main._run_spy_scan). One quick-LLM
+Final phase of the S&P equity allocation (web/spy_routes._run_equity_allocation). One quick-LLM
 call turns the enriched candidates into a JSON array of allocations; if the
 call or its JSON parse fails, a deterministic equal-weight fallback runs so a
 scan never finishes without a portfolio.

@@ -1,6 +1,7 @@
 """S&P 500 scanner: quick screen (all ~500) + deep dive (top 50) + price refresh.
 
-Runs inside the portfolio container, driven by web/portfolio_main._run_spy_scan.
+Runs inside the portfolio container, driven by web/research_engine (shared
+daily research) and web/spy_routes (equity allocation).
 
 Concurrency is shared CROSS-CONTAINER with the api app's single-ticker
 analyses: the api container registers each in-flight analysis as a row in the

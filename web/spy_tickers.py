@@ -3,7 +3,7 @@
 The cache is a module global, i.e. per-process: every container that imports
 this keeps its own copy. On a fetch failure a stale cache is served if one
 exists; with no cache at all the error propagates and the caller
-(portfolio_main._run_spy_scan) fails the scan with a friendly phase message.
+(research_engine.run_research) fails the scan with a friendly phase message.
 Symbols are normalized to yfinance form (BRK.B → BRK-B).
 """
 from __future__ import annotations
