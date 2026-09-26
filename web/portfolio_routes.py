@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
@@ -83,7 +83,6 @@ def schwab_status() -> dict[str, Any]:
 
 @router.post("/api/portfolio-scan")
 async def start_scan(
-    background_tasks: BackgroundTasks,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Kick off a portfolio scan. Idempotent for the same date — returns the
@@ -123,7 +122,7 @@ async def start_scan(
             return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
 
         scan_id = db.create_portfolio_scan(today)
-    background_tasks.add_task(_run_scan_thread, scan_id, today, aggressiveness, bias)
+    scan_queue.spawn_worker(_run_scan_thread, scan_id, today, aggressiveness, bias)
     return {"scan_id": scan_id, "status": "running", "new": True}
 
 
@@ -162,7 +161,8 @@ def delete_all_scans() -> dict[str, Any]:
 # ---------- background worker ----------
 
 def _run_scan_thread(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str = "neutral") -> None:
-    """Synchronous worker run inside a thread by FastAPI BackgroundTasks."""
+    """Synchronous worker, run in a daemon thread started by scan_queue.spawn_worker
+    (both by start_scan directly and by the queue's _dequeue_next_scan)."""
     scan_queue.refresh_creds_from_db()
     try:
         _run_scan(scan_id, trade_date, aggressiveness, bias)
