@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -898,3 +898,440 @@ def test_require_trading_day_saturday_force_passes():
 
 def test_require_trading_day_tuesday_passes():
     research_engine.require_trading_day("2026-06-02", force=False)
+
+
+# ── Per-account allocation core ──────────────────────────────────────────────
+
+_ALLOC_TD = "2026-09-29"  # a Tuesday
+
+
+def _et(y, mo, d, h, mi):
+    return datetime(y, mo, d, h, mi, tzinfo=market_calendar._ET)
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    """Mutable fake ET clock; the patched sleep advances it and never blocks."""
+    c = SimpleNamespace(now=_et(2026, 9, 29, 10, 0), sleeps=[], on_sleep=None)
+    monkeypatch.setattr(market_calendar, "now_et", lambda: c.now)
+
+    def fake_sleep(seconds):
+        c.sleeps.append(seconds)
+        c.now = c.now + timedelta(seconds=seconds)
+        if c.on_sleep is not None:
+            c.on_sleep(len(c.sleeps))
+
+    monkeypatch.setattr(research_engine.time_mod, "sleep", fake_sleep)
+    monkeypatch.delenv("RESEARCH_DEADLINE_ET", raising=False)
+    monkeypatch.delenv("RESEARCH_WAIT_MAX_MIN", raising=False)
+    return c
+
+
+def _record_statuses(monkeypatch, scan_id):
+    statuses: list[str] = []
+    real = db.update_spy_scan
+
+    def recording(sid, **kwargs):
+        if sid == scan_id and "status" in kwargs:
+            statuses.append(kwargs["status"])
+        real(sid, **kwargs)
+
+    monkeypatch.setattr(db, "update_spy_scan", recording)
+    return statuses
+
+
+def _completed_research(td=_ALLOC_TD):
+    rid = db.create_spy_scan(td, kind="research")
+    db.complete_spy_scan(rid, "r", [])
+    return rid
+
+
+def _failed_research(td=_ALLOC_TD):
+    rid = db.create_spy_scan(td, kind="research")
+    db.fail_spy_scan(rid, "boom")
+    return rid
+
+
+def test_wait_for_research_returns_completed_row_without_sleeping(tmp_db, clock):
+    rid = _completed_research()
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+
+    research = research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    assert research["id"] == rid
+    assert "quick_results" in research
+    assert db.get_spy_scan(sid)["research_scan_id"] == rid
+    assert clock.sleeps == []
+
+
+def test_wait_for_research_picks_up_newer_completed_row_after_failure(tmp_db, clock):
+    _failed_research()
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+    created: list[int] = []
+
+    def on_sleep(n):
+        if n == 1:
+            created.append(_completed_research())
+
+    clock.on_sleep = on_sleep
+
+    research = research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    assert research["id"] == created[0]
+    assert len(clock.sleeps) == 1
+
+
+def test_wait_for_research_missing_raises_after_max_wait(tmp_db, clock):
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+
+    with pytest.raises(RuntimeError, match="status=missing"):
+        research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    # start + 90 min (11:30) beats the 10:30 deadline.
+    assert clock.now >= _et(2026, 9, 29, 11, 30)
+
+
+def test_wait_for_research_env_deadline_failed_row(tmp_db, clock, monkeypatch):
+    monkeypatch.setenv("RESEARCH_DEADLINE_ET", "09:10")
+    monkeypatch.setenv("RESEARCH_WAIT_MAX_MIN", "5")
+    clock.now = _et(2026, 9, 29, 9, 0)
+    _failed_research()
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+
+    with pytest.raises(RuntimeError, match="status=failed"):
+        research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    assert clock.now >= _et(2026, 9, 29, 9, 10)
+    assert clock.now < _et(2026, 9, 29, 9, 12)
+
+
+@pytest.mark.parametrize("deadline,max_min", [("bogus", "x"), ("25:99", "0"), ("", "-3")])
+def test_research_deadline_malformed_env_falls_back(monkeypatch, deadline, max_min):
+    monkeypatch.setenv("RESEARCH_DEADLINE_ET", deadline)
+    monkeypatch.setenv("RESEARCH_WAIT_MAX_MIN", max_min)
+    start = _et(2026, 9, 29, 7, 0)
+    assert research_engine._research_deadline(start) == _et(2026, 9, 29, 10, 30)
+    late = _et(2026, 9, 29, 10, 0)
+    assert research_engine._research_deadline(late) == _et(2026, 9, 29, 11, 30)
+
+
+def test_wait_for_research_first_tick_heartbeats_status(tmp_db, clock, monkeypatch):
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity", status="pending")
+    statuses = _record_statuses(monkeypatch, sid)
+    seen: list[str] = []
+
+    def on_sleep(n):
+        seen.append(db.get_spy_scan(sid)["status"])
+        _completed_research()
+
+    clock.on_sleep = on_sleep
+
+    research_engine.wait_for_research(sid, _ALLOC_TD)
+
+    assert statuses[0] == "running_wait_research"
+    assert seen == ["running_wait_research"]
+
+
+def test_wait_for_research_cancel_raises(tmp_db, clock):
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+    db.request_spy_scan_cancel(sid)
+
+    with pytest.raises(spy_scanner.ScanCancelled):
+        research_engine.wait_for_research(sid, _ALLOC_TD)
+    assert clock.sleeps == []
+
+
+def test_wait_for_research_ignores_other_dates(tmp_db, clock, monkeypatch):
+    monkeypatch.setenv("RESEARCH_DEADLINE_ET", "10:00")
+    monkeypatch.setenv("RESEARCH_WAIT_MAX_MIN", "1")
+    _completed_research("2026-09-28")
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+
+    with pytest.raises(RuntimeError, match="status=missing"):
+        research_engine.wait_for_research(sid, _ALLOC_TD)
+    assert db.get_spy_scan(sid)["research_scan_id"] is None
+
+
+@pytest.fixture()
+def seeded_allocation(tmp_db, clock, monkeypatch):
+    """A completed research row plus an equity allocation row at Tue 09:40 ET."""
+    td = _ALLOC_TD
+    rid = db.create_spy_scan(td, kind="research")
+
+    aid_a = db.create_analysis({"ticker": "AAPL", "trade_date": td})
+    db.complete_analysis(aid_a, {"final_trade_decision": "Rating: Buy"}, "Buy")
+    db.upsert_spy_quick_result(rid, "AAPL", signal="Buy", conviction=9,
+                               reasoning="good", analysis_id=aid_a)
+
+    aid_b = db.create_analysis({"ticker": "BBB", "trade_date": td})
+    db.fail_analysis(aid_b, "boom")
+    db.upsert_spy_quick_result(rid, "BBB", signal="Sell", conviction=8,
+                               reasoning="bad", analysis_id=aid_b)
+
+    db.upsert_spy_quick_result(rid, "CCC", signal="Hold", conviction=3, reasoning="meh")
+
+    db.update_spy_scan(rid, quick_count=3, quick_total=3, deep_count=2, deep_total=2,
+                       deep_reused_count=1, quick_fingerprint="fp")
+    db.complete_spy_scan(rid, "r", [])
+
+    pid = db.create_paper_account("eq", aggressiveness=3, bias="bearish")
+    sid = db.create_spy_scan(td, paper_account_id=pid, aggressiveness=7,
+                             bias="bullish", kind="equity")
+
+    clock.now = _et(2026, 9, 29, 9, 40)
+    configs: list[dict[str, Any]] = []
+    monkeypatch.setattr(research_engine, "build_config",
+                        lambda p: configs.append(p) or {"cfg": True})
+    price_calls: list[list[str]] = []
+
+    def fake_prices(tickers, *, log_label="prices"):
+        price_calls.append(list(tickers))
+        return {"AAPL": 101.0, "ZZZ": 5.0}
+
+    monkeypatch.setattr(spy_scanner, "fetch_live_prices", fake_prices)
+    return SimpleNamespace(td=td, rid=rid, sid=sid, pid=pid,
+                           configs=configs, price_calls=price_calls)
+
+
+def test_run_allocation_builds_context_and_copies_research(seeded_allocation, monkeypatch):
+    s = seeded_allocation
+    statuses = _record_statuses(monkeypatch, s.sid)
+    calls: list[tuple[Any, bool]] = []
+
+    def allocate(ctx):
+        calls.append((ctx, research_engine._ALLOC_LOCK.locked()))
+
+    research_engine.run_allocation(s.sid, s.td, allocate, extra_tickers=["zzz"])
+
+    assert len(calls) == 1
+    ctx, locked = calls[0]
+    assert locked is True
+    assert research_engine._ALLOC_LOCK.locked() is False
+    assert isinstance(ctx, research_engine.AllocationContext)
+    assert ctx.research["id"] == s.rid
+    assert [r["ticker"] for r in ctx.usable] == ["AAPL"]
+    assert ctx.usable[0]["entry_price"] == 101.0
+    assert len(ctx.quick_results) == 3
+    assert ctx.aggressiveness == 7
+    assert ctx.bias == "bullish"
+    assert ctx.account["id"] == s.pid
+    assert ctx.trade_date == s.td
+    assert ctx.live_prices == {"AAPL": 101.0, "ZZZ": 5.0}
+    assert ctx.config == {"cfg": True}
+    assert s.configs[0]["aggressiveness"] == 7
+    assert s.configs[0]["bias"] == "bullish"
+
+    assert s.price_calls == [["AAPL", "ZZZ"]]
+
+    row = db.get_spy_scan(s.sid)
+    assert row["research_scan_id"] == s.rid
+    assert row["quick_fingerprint"] == "fp"
+    assert (row["quick_count"], row["quick_total"], row["deep_count"],
+            row["deep_total"], row["deep_reused_count"]) == (3, 3, 2, 2, 1)
+    assert len(row["quick_results"]) == 3
+
+    wanted = ["running_wait_research", "running_wait_market", "running_alloc"]
+    idx = [statuses.index(w) for w in wanted]
+    assert idx == sorted(idx)
+
+
+def test_run_allocation_price_failure_still_allocates(seeded_allocation, monkeypatch):
+    s = seeded_allocation
+
+    def boom(tickers, *, log_label="prices"):
+        raise RuntimeError("quotes down")
+
+    monkeypatch.setattr(spy_scanner, "fetch_live_prices", boom)
+    calls: list[Any] = []
+
+    research_engine.run_allocation(s.sid, s.td, calls.append)
+
+    assert len(calls) == 1
+    assert calls[0].live_prices == {}
+    assert calls[0].usable[0]["entry_price"] is None
+
+
+def test_run_allocation_allocate_error_propagates_and_releases_lock(seeded_allocation):
+    s = seeded_allocation
+
+    def allocate(ctx):
+        raise ValueError("bad allocation")
+
+    with pytest.raises(ValueError, match="bad allocation"):
+        research_engine.run_allocation(s.sid, s.td, allocate)
+    assert research_engine._ALLOC_LOCK.locked() is False
+
+
+def test_run_allocation_requires_paper_account(tmp_db, clock):
+    sid = db.create_spy_scan(_ALLOC_TD, kind="equity")
+    with pytest.raises(RuntimeError, match="paper_account_id"):
+        research_engine.run_allocation(sid, _ALLOC_TD, lambda ctx: None)
+
+
+_SIGNALS = ["Buy", "overweight", "HOLD", "Underweight", "sell"]
+_KEEP = {"BUY", "OVERWEIGHT", "HOLD"}
+
+
+@pytest.mark.parametrize("signal", _SIGNALS)
+@pytest.mark.parametrize("held", [True, False])
+@pytest.mark.parametrize("price", [42, None])
+def test_equity_candidates_matrix(signal, held, price):
+    row = {"ticker": "abc", "signal": signal, "conviction": 5, "entry_price": price}
+    before = dict(row)
+    held_tickers = ["ABC"] if held else ["XYZ"]
+
+    out = research_engine.equity_candidates([row], held_tickers)
+
+    assert row == before
+    expected = (signal.upper() in _KEEP or held) and price is not None
+    if not expected:
+        assert out == []
+        return
+    assert len(out) == 1
+    assert out[0] is not row
+    assert out[0]["ticker"] == "ABC"
+    assert out[0]["signal"] == signal
+    assert isinstance(out[0]["entry_price"], float)
+    assert out[0]["entry_price"] == 42.0
+
+
+def test_equity_candidates_keeps_held_sell_and_preserves_order():
+    usable = [
+        {"ticker": "aaa", "signal": "Sell", "entry_price": 10},
+        {"ticker": "BBB", "signal": "Buy", "entry_price": 0},
+        {"ticker": "CCC", "signal": "Hold", "entry_price": "12.5"},
+        {"ticker": "DDD", "signal": "Sell", "entry_price": 3},
+    ]
+    out = research_engine.equity_candidates(usable, {"Aaa"})
+    assert [r["ticker"] for r in out] == ["AAA", "CCC"]
+    assert out[1]["entry_price"] == 12.5
+    assert usable[0]["ticker"] == "aaa"
+
+
+@pytest.fixture()
+def start_env(tmp_db, monkeypatch):
+    spawns: list[tuple[Any, int, str]] = []
+    monkeypatch.setattr(scan_queue, "spawn_worker",
+                        lambda target, sid, td: spawns.append((target, sid, td)))
+
+    def spy_runner(s, t):
+        return None
+
+    def options_runner(s, t):
+        return None
+
+    def research_runner(s, t):
+        return None
+
+    monkeypatch.setitem(scan_queue._RUNNERS, "spy", (SimpleNamespace(run=spy_runner), "run"))
+    monkeypatch.setitem(scan_queue._RUNNERS, "options",
+                        (SimpleNamespace(run=options_runner), "run"))
+    monkeypatch.setitem(scan_queue._RUNNERS, "research",
+                        (SimpleNamespace(run=research_runner), "run"))
+    pid = db.create_paper_account("acct", aggressiveness=6, bias="bearish")
+    return SimpleNamespace(spawns=spawns, account=db.get_paper_account(pid), pid=pid,
+                           spy=spy_runner, options=options_runner, research=research_runner)
+
+
+def _research_rows(td):
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT id, status FROM spy_scans WHERE kind = 'research' AND trade_date = ?",
+            (td,),
+        ).fetchall()
+
+
+def test_start_allocation_saturday_requires_force(start_env):
+    sat = "2026-09-26"
+    with pytest.raises(research_engine.NotTradingDay):
+        research_engine.start_allocation(start_env.account, sat, "equity")
+    assert start_env.spawns == []
+
+    _completed_research(sat)
+    res = research_engine.start_allocation(start_env.account, sat, "equity", force=True)
+    assert res["new"] is True
+    assert len(start_env.spawns) == 1
+
+
+def test_start_allocation_bad_kind(start_env):
+    with pytest.raises(ValueError):
+        research_engine.start_allocation(start_env.account, _ALLOC_TD, "research")
+    assert start_env.spawns == []
+
+
+def test_start_allocation_with_completed_research_is_idempotent(start_env):
+    rid = _completed_research()
+
+    res = research_engine.start_allocation(start_env.account, _ALLOC_TD, "equity")
+
+    assert res["new"] is True
+    assert res["account_id"] == start_env.pid
+    assert res["status"] == "running_wait_research"
+    assert res["research"] == {"scan_id": rid, "status": "completed", "new": False}
+    row = db.get_spy_scan(res["scan_id"])
+    assert row["kind"] == "equity"
+    assert row["paper_account_id"] == start_env.pid
+    assert row["aggressiveness"] == 6
+    assert row["bias"] == "bearish"
+    assert row["status"] == "running_wait_research"
+    assert row["research_scan_id"] == rid
+    assert start_env.spawns == [(start_env.spy, res["scan_id"], _ALLOC_TD)]
+
+    again = research_engine.start_allocation(start_env.account, _ALLOC_TD, "equity")
+    assert again["new"] is False
+    assert again["scan_id"] == res["scan_id"]
+    assert again["status"] == "running_wait_research"
+    assert len(start_env.spawns) == 1
+
+
+def test_start_allocation_explicit_overrides_and_options_runner(start_env):
+    _completed_research()
+
+    res = research_engine.start_allocation(start_env.account, _ALLOC_TD, "options",
+                                           aggressiveness=9, bias="bullish")
+
+    row = db.get_spy_scan(res["scan_id"])
+    assert row["kind"] == "options"
+    assert row["aggressiveness"] == 9
+    assert row["bias"] == "bullish"
+    assert start_env.spawns == [(start_env.options, res["scan_id"], _ALLOC_TD)]
+
+
+def test_start_allocation_kicks_research_when_none_today(start_env):
+    res = research_engine.start_allocation(start_env.account, _ALLOC_TD, "equity")
+
+    rows = _research_rows(_ALLOC_TD)
+    assert len(rows) == 1
+    assert res["research"]["new"] is True
+    assert res["research"]["scan_id"] == rows[0]["id"]
+    assert db.get_spy_scan(res["scan_id"])["research_scan_id"] is None
+    assert [t for t, _, _ in start_env.spawns] == [start_env.research, start_env.spy]
+    assert start_env.spawns[0][1] == rows[0]["id"]
+    assert start_env.spawns[1][1] == res["scan_id"]
+
+
+def test_start_allocation_after_failed_research_does_not_rekick(start_env):
+    fid = _failed_research()
+
+    res = research_engine.start_allocation(start_env.account, _ALLOC_TD, "equity")
+
+    rows = _research_rows(_ALLOC_TD)
+    assert [r["id"] for r in rows] == [fid]
+    assert res["research"] == {"scan_id": fid, "status": "failed", "new": False}
+    assert start_env.spawns == [(start_env.spy, res["scan_id"], _ALLOC_TD)]
+
+
+def test_start_allocation_missing_runner_fails_row(start_env, monkeypatch):
+    _completed_research()
+    monkeypatch.delitem(scan_queue._RUNNERS, "spy")
+
+    with pytest.raises(RuntimeError, match="no allocation runner"):
+        research_engine.start_allocation(start_env.account, _ALLOC_TD, "equity")
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, error FROM spy_scans WHERE kind = 'equity' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row["status"] == "failed"
+    assert "no allocation runner" in row["error"]
+    assert start_env.spawns == []

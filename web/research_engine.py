@@ -17,14 +17,15 @@ import logging
 import os
 import threading
 import time as time_mod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import yfinance as yf
 
-from . import alerts, db, market_cache, market_calendar, scan_queue, spy_scanner
+from . import account_policy, alerts, db, market_cache, market_calendar, scan_queue, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -517,3 +518,273 @@ def ensure_research_scan(today: str) -> dict[str, Any]:
 
     scan_queue.spawn_worker(target, sid, today)
     return {"scan_id": sid, "status": "pending", "new": True}
+
+
+# ── Per-account allocation ───────────────────────────────────────────────────
+
+_RESEARCH_POLL_SECONDS = 30.0
+_DEFAULT_RESEARCH_DEADLINE = (10, 30)
+_DEFAULT_RESEARCH_WAIT_MAX_MIN = 90
+
+
+def _research_deadline(start: datetime) -> datetime:
+    """When an allocation stops waiting for today's research.
+
+    The later of RESEARCH_DEADLINE_ET (default 10:30 ET) on ``start``'s day and
+    ``start`` + RESEARCH_WAIT_MAX_MIN (default 90) minutes. Both env vars are
+    read at call time; malformed values fall back to the defaults.
+    """
+    hm = account_policy.parse_hhmm(os.environ.get("RESEARCH_DEADLINE_ET", "10:30"))
+    h, m = hm if hm is not None else _DEFAULT_RESEARCH_DEADLINE
+    try:
+        max_min = int(os.environ.get("RESEARCH_WAIT_MAX_MIN", str(_DEFAULT_RESEARCH_WAIT_MAX_MIN)).strip())
+    except ValueError:
+        max_min = _DEFAULT_RESEARCH_WAIT_MAX_MIN
+    if max_min <= 0:
+        max_min = _DEFAULT_RESEARCH_WAIT_MAX_MIN
+    return max(
+        start.replace(hour=h, minute=m, second=0, microsecond=0),
+        start + timedelta(minutes=max_min),
+    )
+
+
+def wait_for_research(scan_id: int, trade_date: str) -> dict[str, Any]:
+    """Block until ``trade_date``'s shared research completes; return it.
+
+    Failed, cancelled, running and missing research rows all keep the wait
+    going, because a retry may still create a newer row. Past the deadline
+    (see _research_deadline) this raises RuntimeError. Heartbeats the
+    allocation row every ~3 minutes so the stuck-run reaper leaves it alone.
+    """
+    start = market_calendar.now_et()
+    deadline = _research_deadline(start)
+    ticks = 0
+    while True:
+        if db.is_spy_scan_cancelled(scan_id):
+            raise spy_scanner.ScanCancelled()
+        done = db.latest_research_scan(trade_date, completed_only=True)
+        if done:
+            db.update_spy_scan(scan_id, research_scan_id=done["id"])
+            return db.get_spy_scan(done["id"]) or {}
+        if ticks % 6 == 0:
+            db.update_spy_scan(scan_id, status="running_wait_research")  # heartbeat
+            newest = db.latest_research_scan(trade_date)
+            log.info("[alloc %s] waiting for research (%s)",
+                     scan_id, newest["status"] if newest else "missing")
+        if market_calendar.now_et() >= deadline:
+            newest = db.latest_research_scan(trade_date)
+            status = newest["status"] if newest else "missing"
+            raise RuntimeError(
+                f"today's research is not complete (status={status}) "
+                f"— allocation abandoned at {deadline:%H:%M} ET")
+        ticks += 1
+        time_mod.sleep(_RESEARCH_POLL_SECONDS)
+
+
+@dataclass
+class AllocationContext:
+    """Everything an engine-specific allocate() callback needs."""
+
+    scan: dict[str, Any]
+    account: dict[str, Any]
+    research: dict[str, Any]
+    trade_date: str
+    quick_results: list[dict[str, Any]]
+    usable: list[dict[str, Any]]
+    live_prices: dict[str, float]
+    config: dict[str, Any]
+    aggressiveness: int
+    bias: str
+
+
+def run_allocation(
+    scan_id: int,
+    trade_date: str,
+    allocate: Callable[[AllocationContext], None],
+    *,
+    extra_tickers: Iterable[str] = (),
+) -> None:
+    """Wait for today's research and the open, then call ``allocate`` once.
+
+    Copies the research's quick rows and counters onto the allocation row,
+    waits for MARKET_OPEN_ET, then under the global allocation lock fetches
+    live quotes for the usable deep-dived names (plus ``extra_tickers``, e.g.
+    current holdings) and hands an AllocationContext to ``allocate``.
+
+    Callers own completion (``complete_spy_scan``). The ~1 min of post-open
+    work runs one account at a time under the global lock.
+    """
+    # (0) setup
+    scan = db.get_spy_scan(scan_id) or {}
+    pid = scan.get("paper_account_id")
+    if pid is None:
+        raise RuntimeError("allocation requires a paper_account_id")
+    account = db.get_paper_account(int(pid))
+    if not account:
+        raise RuntimeError(f"paper account {pid} not found")
+    aggressiveness = int(scan.get("aggressiveness") or account.get("aggressiveness") or 5)
+    bias = scan.get("bias") or account.get("bias") or "neutral"
+    config = build_config({
+        **(db.get_preferences() or {}),
+        "aggressiveness": aggressiveness,
+        "bias": bias,
+    })
+
+    # (1) wait for today's shared research
+    db.update_spy_scan(scan_id, status="running_wait_research")
+    research = wait_for_research(scan_id, trade_date)
+
+    # (2) copy the research onto the allocation row
+    db.copy_spy_quick_results(research["id"], scan_id)
+    db.update_spy_scan(
+        scan_id,
+        quick_fingerprint=research.get("quick_fingerprint"),
+        quick_count=research.get("quick_count") or 0,
+        quick_total=research.get("quick_total") or 0,
+        deep_count=research.get("deep_count") or 0,
+        deep_total=research.get("deep_total") or 0,
+        deep_reused_count=research.get("deep_reused_count") or 0,
+    )
+    if db.is_spy_scan_cancelled(scan_id):
+        raise spy_scanner.ScanCancelled()
+
+    # (3) wait for the open
+    db.update_spy_scan(scan_id, status="running_wait_market")
+    wait_for_market_open(scan_id)
+
+    # (4) allocate under the global lock
+    with _allocation_slot(scan_id):
+        db.update_spy_scan(scan_id, status="running_alloc")
+        usable = [dict(r) for r in db.list_deep_dived_results(research["id"])]
+        tickers: list[str] = []
+        seen: set[str] = set()
+        for raw in [r.get("ticker") for r in usable] + list(extra_tickers):
+            t = (raw or "").upper()
+            if t and t not in seen:
+                seen.add(t)
+                tickers.append(t)
+        try:
+            live = (spy_scanner.fetch_live_prices(tickers, log_label=f"alloc {scan_id}")
+                    if tickers else {})
+        except Exception:
+            log.exception("[alloc %s] live quote fetch failed", scan_id)
+            live = {}
+        for r in usable:
+            r["entry_price"] = live.get((r.get("ticker") or "").upper())
+        allocate(AllocationContext(
+            scan=db.get_spy_scan(scan_id) or scan,
+            account=account,
+            research=research,
+            trade_date=trade_date,
+            quick_results=research.get("quick_results") or [],
+            usable=usable,
+            live_prices=live,
+            config=config,
+            aggressiveness=aggressiveness,
+            bias=bias,
+        ))
+
+
+_EQUITY_KEEP_SIGNALS = frozenset({"BUY", "OVERWEIGHT", "HOLD"})
+
+
+def equity_candidates(
+    usable: list[dict[str, Any]],
+    held_tickers: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Equity rebalance candidates from the usable deep-dived rows.
+
+    Keeps Buy/Overweight/Hold names plus anything currently held (a held
+    Sell-rated name reaches the rebalance as SELL and exits). Rows without a
+    live price are dropped. Returns new dicts; inputs are never mutated.
+    """
+    held = {(t or "").upper() for t in held_tickers}
+    out: list[dict[str, Any]] = []
+    unpriced: list[str] = []
+    for row in usable:
+        t = (row.get("ticker") or "").upper()
+        sig = (row.get("signal") or "").upper()
+        if sig not in _EQUITY_KEEP_SIGNALS and t not in held:
+            continue
+        if not row.get("entry_price"):
+            unpriced.append(t)
+            continue
+        out.append({**row, "ticker": t, "entry_price": float(row["entry_price"])})
+    if unpriced:
+        log.warning("[alloc] dropping %d candidate(s) with no live price: %s",
+                    len(unpriced), ", ".join(unpriced))
+    return out
+
+
+_START_LOCK = threading.Lock()
+_RUNNER_KEY = {"options": "options", "equity": "spy"}
+
+
+def start_allocation(
+    account: dict[str, Any],
+    today: str,
+    kind: str,
+    *,
+    force: bool = False,
+    aggressiveness: int | None = None,
+    bias: str | None = None,
+) -> dict[str, Any]:
+    """Idempotently create and start today's allocation row for one account.
+
+    Allocation rows bypass the compute queue (they are never busy until
+    running_alloc) and serialize only on _ALLOC_LOCK, so no _SCAN_LOCK is
+    taken here. Workers run in their own daemon threads via
+    scan_queue.spawn_worker, because Starlette runs one request's background
+    tasks sequentially.
+
+    Research is kicked only when today has no research row at all; after a
+    failed attempt the scheduler's retry job owns re-kicks.
+    """
+    if kind not in _RUNNER_KEY:
+        raise ValueError(f"unknown allocation kind {kind!r}")
+    require_trading_day(today, force)
+    account_id = int(account["id"])
+
+    with _START_LOCK:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT id, status FROM spy_scans "
+                "WHERE trade_date = ? AND kind = ? AND paper_account_id = ? "
+                "AND status NOT IN ('failed', 'cancelled') "
+                "ORDER BY id DESC LIMIT 1",
+                (today, kind, account_id),
+            ).fetchone()
+        if row:
+            return {"scan_id": row["id"], "account_id": account_id,
+                    "status": row["status"], "new": False}
+        completed = db.latest_research_scan(today, completed_only=True)
+        kick_research = db.count_research_attempts(today) == 0
+        scan_id = db.create_spy_scan(
+            today,
+            paper_account_id=account_id,
+            aggressiveness=int(aggressiveness or account.get("aggressiveness") or 5),
+            bias=bias or account.get("bias") or "neutral",
+            status="running_wait_research",
+            kind=kind,
+            research_scan_id=completed["id"] if completed else None,
+        )
+
+    research = ensure_research_scan(today) if kick_research else None
+    latest = db.latest_research_scan(today)
+
+    target = scan_queue.resolve_runner(_RUNNER_KEY[kind])
+    if target is None:
+        db.fail_spy_scan(scan_id, "no allocation runner registered for this tier")
+        raise RuntimeError("no allocation runner registered for this tier")
+    scan_queue.spawn_worker(target, scan_id, today)
+
+    return {
+        "scan_id": scan_id,
+        "account_id": account_id,
+        "status": "running_wait_research",
+        "new": True,
+        "research": research or (
+            {"scan_id": latest["id"], "status": latest["status"], "new": False}
+            if latest else None
+        ),
+    }
