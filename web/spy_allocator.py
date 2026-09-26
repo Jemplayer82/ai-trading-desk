@@ -447,13 +447,18 @@ def _fallback_daily(
     candidates: list[dict[str, Any]],
     previous_portfolio: list[dict[str, Any]],
     capital: float,
+    max_pos: float | None = None,
+    min_cash_pct: float = 0,
 ) -> list[dict[str, Any]]:
     """Low-churn daily fallback: hold everything, act only on new signals.
 
     Live holdings are kept as HOLD at their previous size unless today's
     research rates them SELL/Underweight (→ EXITED). Non-held BUY/Overweight
-    candidates with conviction ≥ 8 split the free cash (capital minus the
-    held dollars) equally, highest conviction first.
+    candidates with conviction ≥ 8 split the free cash equally, highest
+    conviction first. Free cash is capital minus the min_cash_pct buffer
+    minus the held dollars, and each new position is capped at max_pos
+    (None = uncapped), so a failed LLM call never deploys past the
+    aggressiveness limits from _position_limits.
     """
     cand_map = {c["ticker"]: c for c in candidates}
     live_prev = live_positions(previous_portfolio)
@@ -489,7 +494,7 @@ def _fallback_daily(
     held_dollars = sum(
         float(r.get("dollar_amount") or 0) for r in result if r["action"] == "HOLD"
     )
-    free_cash = capital - held_dollars
+    free_cash = capital * (1 - min_cash_pct / 100) - held_dollars
 
     buys = sorted(
         (
@@ -501,7 +506,10 @@ def _fallback_daily(
         key=lambda c: -(c.get("conviction") or 0),
     )
     if buys and free_cash > 0:
-        per = round(free_cash / len(buys), 2)
+        per = free_cash / len(buys)
+        if max_pos is not None:
+            per = min(per, max_pos)
+        per = round(per, 2)
         alloc_pct = round(per / capital * 100, 2) if capital else 0
         for c in buys:
             result.append({
@@ -583,7 +591,10 @@ def run(
         if cadence == "daily":
             system += _DAILY_REBALANCE_ADDENDUM
         if cadence == "daily" and live_positions(previous_portfolio):
-            fallback_fn = lambda: _fallback_daily(candidates, previous_portfolio or [], capital)
+            fallback_fn = lambda: _fallback_daily(
+                candidates, previous_portfolio or [], capital,
+                max_pos=max_pos, min_cash_pct=min_cash_pct,
+            )
         else:
             fallback_fn = lambda: _fallback_rebalance(candidates, previous_portfolio or [], capital)
 

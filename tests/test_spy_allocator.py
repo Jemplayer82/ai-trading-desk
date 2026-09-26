@@ -209,7 +209,10 @@ def test_daily_fallback_holds_unrated_exits_sell_opens_high_conviction_buy(monke
     by_ticker = {a["ticker"]: a for a in result["allocations"]}
     assert by_ticker["AAPL"]["shares"] == 200
     assert by_ticker["TSLA"]["entry_price"] == 250.0
-    assert by_ticker["AMD"]["shares"] == 700
+    # run() passes aggressiveness 5 limits: 60k free after the 10% cash
+    # buffer, split two ways (30k) and capped at the 12% max position (12k).
+    assert by_ticker["AMD"]["shares"] == 240
+    assert by_ticker["NVDA"]["shares"] == 120
 
 
 def test_daily_fallback_skips_new_when_no_free_cash():
@@ -218,6 +221,41 @@ def test_daily_fallback_skips_new_when_no_free_cash():
     cands = [{"ticker": "AMD", "signal": "Buy", "conviction": 10, "entry_price": 50.0}]
     rows = spy_allocator._fallback_daily(cands, previous, 100_000.0)
     assert [(r["ticker"], r["action"]) for r in rows] == [("AAPL", "HOLD")]
+
+
+def test_daily_fallback_caps_new_position_and_keeps_min_cash(monkeypatch):
+    previous = [{"ticker": "AAA", "action": "HOLD", "allocation_pct": 1.0,
+                 "dollar_amount": 1_000, "entry_price": 100.0, "shares": 10,
+                 "cost_basis": 1_000.0}]
+    cands = [{"ticker": "BBB", "signal": "Buy", "conviction": 9, "entry_price": 100.0}]
+    _fake_llm(monkeypatch, raises=RuntimeError("rate limited"))
+    result = _run(cands, previous, cadence="daily", aggressiveness=2)
+    by_ticker = {a["ticker"]: a for a in result["allocations"]}
+    assert by_ticker["AAA"]["action"] == "HOLD"
+    assert by_ticker["BBB"]["action"] == "NEW"
+    assert by_ticker["BBB"]["cost_basis"] <= 7_000
+    assert by_ticker["BBB"]["shares"] == 70
+    assert result["cash"] >= 20_000
+
+
+def test_daily_fallback_min_cash_limits_new_buys():
+    previous = [{"ticker": "AAPL", "action": "HOLD", "allocation_pct": 85.0,
+                 "dollar_amount": 85_000, "entry_price": 100.0}]
+    cands = [
+        {"ticker": "AMD", "signal": "Buy", "conviction": 10, "entry_price": 50.0},
+        {"ticker": "NVDA", "signal": "Buy", "conviction": 9, "entry_price": 100.0},
+    ]
+    rows = spy_allocator._fallback_daily(
+        cands, previous, 100_000.0, max_pos=12_000.0, min_cash_pct=10,
+    )
+    new = [r for r in rows if r["action"] == "NEW"]
+    # 90k deployable − 85k held = 5k, split two ways
+    assert [r["dollar_amount"] for r in new] == [2_500, 2_500]
+
+    rows = spy_allocator._fallback_daily(
+        cands, previous, 100_000.0, max_pos=12_000.0, min_cash_pct=20,
+    )
+    assert [r["action"] for r in rows] == ["HOLD"]
 
 
 def test_daily_empty_candidates_keeps_holdings(monkeypatch):
