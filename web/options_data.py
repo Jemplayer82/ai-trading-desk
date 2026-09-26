@@ -14,23 +14,18 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
 
 import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import market_cache
+from . import market_cache, market_calendar
 
 log = logging.getLogger(__name__)
 
-try:  # tzdata may be absent on a bare Windows dev host — date math only needs ~ET
-    from zoneinfo import ZoneInfo
-
-    _ET: tzinfo = ZoneInfo("America/New_York")
-except Exception:  # pragma: no cover - environment dependent
-    _ET = timezone(timedelta(hours=-5))
+_ET: tzinfo = market_calendar._ET
 
 # ── Selection thresholds ─────────────────────────────────────────────────────
 MIN_CONVICTION = 6          # options are levered; weak signals just donate theta
@@ -82,11 +77,11 @@ _DIRECTION_BY_SIGNAL = {
 
 
 def today_et() -> date:
-    return datetime.now(_ET).date()
+    return market_calendar.today_et()
 
 
 def now_et() -> datetime:
-    return datetime.now(_ET)
+    return market_calendar.now_et()
 
 
 def build_occ_symbol(underlying: str, expiration_date: str, put_call: str, strike: float) -> str:
