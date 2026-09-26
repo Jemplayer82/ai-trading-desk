@@ -44,7 +44,7 @@ All share one Docker image and one data volume (`tradingagents_data`, mounted at
 |---------|-------------|------|
 | `tradingagents-api` | `uvicorn web.main:app` | Dashboard backend: single-ticker analysis (WebSocket-streamed), auth/login, settings/credentials, Schwab OAuth. |
 | `tradingagents-portfolio` | `uvicorn web.portfolio_main:app` | **Separate** app so long portfolio/S&P/options scans don't block the ad-hoc api. Runs each holding through the core, then the aggregator. Also hosts the daily options paper trader (`web/options_engine.py`). |
-| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET Mon-Fri), daily options scan (07:30 Mon-Fri) + hourly option marks + 20:00 expiry settlement, 5am newsletter, hourly Schwab-token health check, and a 20-min stuck-run reaper (fails+alerts crashed runs). Calls the api/portfolio apps over the Docker network. |
+| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET Mon-Fri), the shared daily S&P 500 research (`research_scan`, 00:00 ET Mon-Fri, plus a 15-min `research_retry` before 05:30 ET), per-account options and S&P equity allocations (each account's own time, default 09:00 ET Mon-Fri, NYSE holidays skipped) + hourly option marks + 20:00 expiry settlement, 5am newsletter, hourly Schwab-token health check, and a 20-min stuck-run reaper (fails+alerts crashed runs). Calls the api/portfolio apps over the Docker network. |
 | `tradingagents-web` | nginx image | Serves `web/static/` and reverse-proxies the `/api/*` routes (see route priority below). Holds no secrets. |
 | `switchboard` | `ghcr.io/jemplayer82/mcp-switchboard` | **Optional, internal-only** message bus for the live Agent Bus feed (see below). No host port; reachable only on the Docker network at `switchboard:3107`. Own SQLite volume (`switchboard_data`). |
 | `tradingagents` | (CLI) | The Typer TUI, attached to interactively. |
@@ -159,10 +159,19 @@ factory and resolves credentials in the order: explicit config → DB credential
   normalized `options_positions` + append-only `options_cash_ledger` (cash =
   `SUM(amount)`; positions and ledger rows mutate only through explicit
   `BEGIN IMMEDIATE` transactions with a `status='open'` idempotency guard, because —
-  unlike the equity paper portfolio's weekly JSON snapshot — contracts open, close,
+  unlike the equity paper portfolio's daily JSON snapshot — contracts open, close,
   and expire on different days, so cash and realized P&L must be authoritative).
   Options scan runs are `spy_scans` rows with `kind='options'`, reusing the equity
   scan's progress/cancel/reaper machinery. Created `0600`.
+- **Shared daily research** (`web/research_engine.py`): each NYSE trading day
+  (`web/market_calendar.py`) gets one `kind='research'` `spy_scans` row — the
+  quick scan + deep dive over the whole S&P 500 — and every paper account's
+  allocation is its own `spy_scans` row (`kind='spy'` or `'options'`) linked to
+  it by `research_scan_id`. Allocation rows wait for that research (status
+  `running_wait_research`) and then for the 09:35 ET open, and run one at a
+  time under `research_engine._ALLOC_LOCK`. They never take the compute-queue
+  slot (only the research row does), so they bypass the queue; every worker
+  thread is started through `scan_queue.spawn_worker`.
 - **Secrets at rest** (`web/secret_box.py`): provider API keys and app settings are
   Fernet-encrypted (key = `TOKEN_ENCRYPTION_KEY`) when that key is set; encrypted values
   carry an `enc:v1:` prefix. Backward-compatible — keyless deployments store plaintext.

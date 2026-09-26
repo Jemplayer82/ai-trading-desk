@@ -161,7 +161,7 @@ TIER_BRANCH = {
 TIER_IDENTITY = {
     1: "Tier 1 — Base: single-ticker AI analysis",
     2: "Tier 2 — Brokerage: + Schwab account scanning",
-    3: "Tier 3 — Scanner: + the weekly S&P 500 scanner",
+    3: "Tier 3 — Scanner: + the daily S&P 500 research and paper portfolio",
     4: "Tier 4 — Full: + daily options paper trading (the complete product)",
 }
 

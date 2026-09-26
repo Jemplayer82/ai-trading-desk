@@ -13,7 +13,7 @@ generated artifacts produced by `scripts/make_tier.py` and published by
 |---|---|---|
 | 1 — Base | `tier-1-base` | single-ticker AI analysis |
 | 2 — Brokerage | `tier-2-brokerage` | + Schwab account scanning |
-| 3 — Scanner | `tier-3-scanner` | + weekly S&P 500 scanner |
+| 3 — Scanner | `tier-3-scanner` | + daily S&P 500 research and paper portfolio |
 | 4 — Full | `master` | + daily options paper trading |
 
 Every regeneration force-pushes over the tier branches, so any commit made

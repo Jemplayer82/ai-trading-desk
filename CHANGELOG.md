@@ -8,6 +8,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Changed — shared daily research
+
+- **One shared research scan per trading day.** A single `kind='research'`
+  scan runs once per NYSE trading day at `SCHEDULE_RESEARCH_TIME` (default
+  `00:00` ET): the momentum/volume pre-screen ranks the whole S&P 500, the top
+  150 movers + SPY get the quick scan, and the top 50 BUY/SELL names + SPY get
+  the full deep dive. It feeds every options and S&P equity paper account. A
+  failed or missing research run gets one automatic retry before 05:30 ET;
+  otherwise accounts skip the day.
+- **Per-account allocation rows.** Each account's scheduled allocation
+  (default `09:00` ET) creates its own row that waits for the day's research
+  (`running_wait_research`, deadline 10:30 ET), then for the 09:35 ET open, and
+  accounts allocate one at a time at live quotes.
+- **S&P equity accounts trade daily** with a low-churn allocator prompt; the
+  weekly Saturday S&P scan is removed.
+- **Bias-neutral research rating.** The Portfolio Manager rating is now
+  bias-neutral; bull/bear bias is applied only in the allocators.
+- **Schedule migration.** Scheduled `paper_accounts.schedule_time` values
+  migrate to `09:00`; `NULL` stays manual-only.
+- **New settings / env:** `SCHEDULE_RESEARCH_TIME`, `MARKET_HOLIDAYS_EXTRA`,
+  `RESEARCH_DEADLINE_ET`, `RESEARCH_WAIT_MAX_MIN`, `RESEARCH_RETRY_CUTOFF_ET`,
+  `RESEARCH_MAX_ATTEMPTS`, `SCAN_HEARTBEAT_SECONDS`.
+- **Schema:** new column `spy_scans.research_scan_id` links each allocation
+  row to the research row it consumed.
+- **Stuck-scan reaper:** `STUCK_SCAN_STALL_MIN` default 60 → 120, and running
+  scans now stamp a 2-minute heartbeat.
+- **Market calendar:** new NYSE holiday calendar `web/market_calendar.py`
+  (2026–27); jobs skip holidays and weekends.
+- **Removed** the queue-slot hand-off between scans.
+- **API:** `POST /api/spy-scan` now requires `account_id`; new
+  `POST /api/research-scan`, `GET /api/research-scans/today` and
+  `GET /api/research-scans`.
+
 ## [2.1.0] — 2026-08-14
 
 Per-account automation scheduling and configurable paper stop-loss policies

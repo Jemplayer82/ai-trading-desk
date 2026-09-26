@@ -36,7 +36,7 @@ want. Each tier is a branch and a matching pair of container image tags.
 |---|---|---|---|
 | **1 — Base** | `tier-1-base` | Single-ticker AI analysis, live agent streaming, charts, Q&A, Agent Bus | `tradingagents:tier1` + `tradingagents-web:tier1` |
 | **2 — Brokerage** | `tier-2-brokerage` | + Schwab account connection, portfolio scanning, morning newsletter | `:tier2` |
-| **3 — Scanner** | `tier-3-scanner` | + weekly S&P 500 scanner and $100k paper portfolio builder | `:tier3` |
+| **3 — Scanner** | `tier-3-scanner` | + the daily S&P 500 research and paper portfolio | `:tier3` |
 | **4 — Full** | `master` | + daily options paper trading | `:latest` / `:tier4` |
 
 Tiers are cumulative — each contains everything below it. `master` is the only
@@ -56,7 +56,7 @@ This project runs a team of specialized LLM agents that mirror the desks of a re
 Connect a Schwab account to scan a live portfolio, with a nightly sweep of every holding and a morning briefing in your inbox.
 <!-- TIER:2 END -->
 <!-- TIER:3 BEGIN -->
-Let the scheduler sweep the entire S&P 500 every week, deep-dive the highest-conviction names, and rebalance a $100k paper portfolio on its own.
+Let the scheduler research the S&P 500 every trading day (a shared 00:00 ET pass), deep-dive the highest-conviction names, and rebalance a $100k paper portfolio on its own after the open.
 <!-- TIER:3 END -->
 <!-- TIER:4 BEGIN -->
 Turn on the daily options paper trader, which hunts S&P 500 movers every weekday and trades long calls and puts under hard risk guardrails, grading its own closed trades to learn from them.
@@ -94,7 +94,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
   - **Portfolio Scan** — your live Schwab holdings, analyzed
   <!-- TIER:2 END -->
   <!-- TIER:3 BEGIN -->
-  - **S&P 500** — the weekly market-wide sweep and paper portfolio
+  - **S&P 500** — the daily market-wide research and paper portfolio
   <!-- TIER:3 END -->
   <!-- TIER:4 BEGIN -->
   - **Options** — the daily options paper trader
@@ -113,7 +113,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Automated nightly portfolio analysis of all holdings, emailed as a morning briefing
 <!-- TIER:2 END -->
 <!-- TIER:3 BEGIN -->
-- S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
+- Shared daily S&P 500 research at 00:00 ET (pre-screen all ~500 tickers, quick scan top 150 + SPY, deep-dive top 50 + SPY) feeding a daily $100k paper portfolio allocation
 <!-- TIER:3 END -->
 <!-- TIER:4 BEGIN -->
 - Daily options paper trader (pre-screen the whole S&P 500 → quick scan top 150 + SPY → deep-dive top 50 directional + SPY → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
@@ -166,7 +166,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 ![S&P 500 scanner with $100k paper portfolio](assets/screenshot-spy-scanner.jpg)
 
-*Scans all ~500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio with live performance tracking. Each paper account runs on its own configurable Saturday scan time set in the account modal.*
+*A shared 00:00 ET research pass pre-screens all ~500 tickers and deep-dives the top 50 by conviction; each paper account then allocates its $100k paper portfolio from that research at its own configurable time (default 09:00 ET, set in the account modal), filling at live quotes after 09:35 ET, with live performance tracking.*
 <!-- TIER:3 END -->
 
 ---
@@ -286,28 +286,29 @@ Run and review scans of your real Schwab holdings:
 <!-- TIER:3 BEGIN -->
 ### S&P 500 Tab
 
-Weekly automated scan of all ~500 S&P 500 tickers, run in three phases:
+Daily paper portfolio built from one shared research pass per NYSE trading day:
 
-- **Phase 1 (Quick)** — All ~500 tickers scored via yfinance + lightweight LLM
-- **Phase 2 (Deep)** — Top 50 by conviction via the full multi-agent graph
-- **Phase 3 (Allocate)** — Build a $100k portfolio with position sizing
+- **Research (00:00 ET, shared)** — momentum/volume pre-screen ranks all ~500 S&P 500 tickers; the top 150 + SPY get the quick LLM scan and the top 50 BUY/SELL names + SPY get the full multi-agent deep dive. One automatic retry runs before 05:30 ET; if the research still fails, accounts skip the day
+- **Allocation (per account, default 09:00 ET)** — each account's allocation waits for that day's research, then for the 09:35 ET open, and builds or rebalances its $100k portfolio at live quotes with position sizing
+- **Low churn** — the daily allocator keeps existing holdings by default and only trades on a real change in conviction
 
-The scan re-runs automatically at each account's configured time, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking. Hourly price refreshes also enforce that account's configured stop policy (none / stop / stop-limit / trailing % / trailing $) against its paper positions, booking a simulated exit into the snapshot with its realized P&L — simulated only, the app never places a real order.
+Each account's allocation time is configurable in the account modal, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking. Hourly price refreshes also enforce that account's configured stop policy (none / stop / stop-limit / trailing % / trailing $) against its paper positions, booking a simulated exit into the snapshot with its realized P&L — simulated only, the app never places a real order.
 <!-- TIER:3 END -->
 
 <!-- TIER:4 BEGIN -->
 ### Options Tab
 
-Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every weekday:
+Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every trading day:
 
-- **Per-account build time (default 07:30 ET)** — momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
+- **Shared research (00:00 ET)** — one research pass per trading day, shared with the S&P tab: momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
+- **Per-account allocation time (default 09:00 ET)** — each account allocates from that day's research at its own configurable time
 - **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
 - **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
 - **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 unconditionally, while the stop is now the account's configured policy (none / stop / stop-limit / trailing % / trailing $), backfilled to a 60% stop for existing options accounts, per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
 - **Hourly marks** (10:00–16:00 + 16:45 ET) enforce the account's own stop policy intraday like standing orders, booked at the minute the level was crossed: a level crossed during the interval fills **at** the level, a gap straight through fills at the observed quote, and a **stop-limit** that gaps below its limit price rests until a later refresh quotes back at or above it. Stale/carried marks never trigger, and `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false` disables the whole intraday pass regardless of any account's policy. A **20:00 ET expiry settlement** sweep models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
 - **20:15 ET learning pass** — deep-dive directional calls are graded nightly against the underlying's forward alpha (the shared memory log), and every closed position gets a directional-vs-decay P&L attribution; once enough closes accumulate, a nightly batch reflection distills "watch for …" lessons that are injected into the next allocator run as context (hard risk limits are never relaxed by lessons)
 
-Unlike the S&P tab's weekly snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
+Unlike the S&P tab's daily snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
 
 The tab also has an on-demand **Ticker Recommendation** box: type any ticker and get a specific contract pick with confidence (1–10), entry/target/stop premiums, horizon, thesis and risks. It runs the same momentum quick-read and contract-vetting pipeline as the daily scan, vets **both** the call and the put, and the advisor is briefed with the system's graded decision history and its own options lessons — every recommendation is itself stored and graded by the nightly learning sweep. Advisory only; nothing is traded.
 <!-- TIER:4 END -->
@@ -658,6 +659,7 @@ ai-trading-desk/
 # TIER:3 BEGIN
 │   ├── spy_scanner.py      # S&P 500 3-phase scanner
 │   ├── spy_allocator.py    # $100k portfolio builder
+│   ├── research_engine.py  # shared daily S&P 500 research
 # TIER:3 END
 # TIER:4 BEGIN
 │   ├── options_engine.py   # daily options build pipeline

@@ -1,4 +1,4 @@
-"""LLM allocator: 50 deep-dive results → $100k paper portfolio (or weekly rebalance).
+"""LLM allocator: 50 deep-dive results → $100k paper portfolio (or daily rebalance).
 
 Final phase of the S&P equity allocation (web/spy_routes._run_equity_allocation). One quick-LLM
 call turns the enriched candidates into a JSON array of allocations; if the

@@ -44,6 +44,8 @@ _FORBIDDEN = [
         "that global config key was deleted along with options_trailing_stop / "
         "options_trail_give_back; stop behavior is per-account policy",
     ),
+    ("every Saturday", "the weekly Saturday S&P scan was replaced by daily allocation from the shared research"),
+    ("default 07:30 ET", "account allocation times default to 09:00 ET off the shared 00:00 research"),
 ]
 
 
