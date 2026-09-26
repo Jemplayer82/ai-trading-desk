@@ -15,7 +15,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from web import alerts, db, market_cache, market_calendar, research_engine, scan_queue, spy_scanner
+from web import alerts, db, market_cache, market_calendar, research_engine, scan_queue, spy_allocator, spy_scanner
 
 pytestmark = pytest.mark.unit
 
@@ -1183,7 +1183,7 @@ def test_equity_candidates_matrix(signal, held, price):
     out = research_engine.equity_candidates([row], held_tickers)
 
     assert row == before
-    expected = (signal.upper() in _KEEP or held) and price is not None
+    expected = held or (signal.upper() in _KEEP and price is not None)
     if not expected:
         assert out == []
         return
@@ -1191,6 +1191,10 @@ def test_equity_candidates_matrix(signal, held, price):
     assert out[0] is not row
     assert out[0]["ticker"] == "ABC"
     assert out[0]["signal"] == signal
+    if price is None:
+        # Held but unpriced: kept for its signal, priced from the holding downstream.
+        assert out[0]["entry_price"] is None
+        return
     assert isinstance(out[0]["entry_price"], float)
     assert out[0]["entry_price"] == 42.0
 
@@ -1206,6 +1210,36 @@ def test_equity_candidates_keeps_held_sell_and_preserves_order():
     assert [r["ticker"] for r in out] == ["AAA", "CCC"]
     assert out[1]["entry_price"] == 12.5
     assert usable[0]["ticker"] == "aaa"
+
+
+def test_equity_candidates_held_unpriced_sell_exits_on_daily_rebalance():
+    # Partial quote set: the held SELL name has no live price today.
+    usable = [
+        {"ticker": "aaa", "signal": "Sell", "conviction": 7, "entry_price": None},
+        {"ticker": "BBB", "signal": "Buy", "conviction": 9, "entry_price": None},
+        {"ticker": "CCC", "signal": "Hold", "conviction": 6, "entry_price": 20},
+    ]
+    out = research_engine.equity_candidates(usable, {"AAA", "CCC"})
+    assert [r["ticker"] for r in out] == ["AAA", "CCC"]
+    assert out[0]["signal"] == "Sell"
+    assert out[0]["entry_price"] is None
+
+    previous = [
+        {"ticker": "AAA", "action": "HOLD", "shares": 10, "entry_price": 50.0,
+         "dollar_amount": 500.0, "allocation_pct": 5.0},
+        {"ticker": "CCC", "action": "HOLD", "shares": 10, "entry_price": 20.0,
+         "dollar_amount": 200.0, "allocation_pct": 2.0},
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        out, previous, "2026-09-25", 10_000.0, cadence="daily")
+    aaa_line = next(line for line in msg.splitlines() if line.startswith("AAA |"))
+    assert "signal: SELL" in aaa_line
+    assert "Not re-rated" not in aaa_line
+
+    result = spy_allocator._fallback_daily(out, previous, 10_000.0)
+    actions = {r["ticker"]: r["action"] for r in result}
+    assert actions["AAA"] == "EXITED"
+    assert actions["CCC"] == "HOLD"
 
 
 @pytest.fixture()

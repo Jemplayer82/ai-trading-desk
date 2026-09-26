@@ -694,24 +694,35 @@ def equity_candidates(
     """Equity rebalance candidates from the usable deep-dived rows.
 
     Keeps Buy/Overweight/Hold names plus anything currently held (a held
-    Sell-rated name reaches the rebalance as SELL and exits). Rows without a
-    live price are dropped. Returns new dicts; inputs are never mutated.
+    Sell-rated name reaches the rebalance as SELL and exits). Non-held rows
+    without a live price are dropped; a held row without one is still kept,
+    with ``entry_price`` None, so today's rating (e.g. SELL) is not lost — the
+    rebalance prices held positions from the previous portfolio. Returns new
+    dicts; inputs are never mutated.
     """
     held = {(t or "").upper() for t in held_tickers}
     out: list[dict[str, Any]] = []
     unpriced: list[str] = []
+    held_unpriced: list[str] = []
     for row in usable:
         t = (row.get("ticker") or "").upper()
         sig = (row.get("signal") or "").upper()
         if sig not in _EQUITY_KEEP_SIGNALS and t not in held:
             continue
         if not row.get("entry_price"):
-            unpriced.append(t)
+            if t in held:
+                held_unpriced.append(t)
+                out.append({**row, "ticker": t, "entry_price": None})
+            else:
+                unpriced.append(t)
             continue
         out.append({**row, "ticker": t, "entry_price": float(row["entry_price"])})
     if unpriced:
         log.warning("[alloc] dropping %d candidate(s) with no live price: %s",
                     len(unpriced), ", ".join(unpriced))
+    if held_unpriced:
+        log.warning("[alloc] keeping %d held candidate(s) with no live price (signal only): %s",
+                    len(held_unpriced), ", ".join(held_unpriced))
     return out
 
 
