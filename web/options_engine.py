@@ -166,7 +166,7 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
     Blocks in _ALLOC_POLL_SECONDS slices rather than one open-ended
     acquire so a queued waiter (a) keeps writing updated_at and cannot
     be mistaken for a crashed worker by the stuck-run reaper
-    (web/scheduler.py STUCK_SCAN_STALL_MIN, default 60 min) and (b)
+    (web/scheduler.py STUCK_SCAN_STALL_MIN, default 120 min) and (b)
     still honours a cancel request while blocked. Fails loudly past
     _ALLOC_TIMEOUT_SECONDS instead of hanging a thread forever.
 

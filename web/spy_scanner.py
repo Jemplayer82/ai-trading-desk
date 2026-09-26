@@ -53,8 +53,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -105,6 +107,55 @@ _PRICE_DATA_MIN_COMPLETENESS = 0.8
 
 _PRICE_DATA_CACHE = market_cache.SameDayCache("spy-price-data",
                                               ttl_seconds=_PRICE_DATA_TTL_SECONDS)
+
+
+# Heartbeat interval for running scans. A scan writes updated_at via this
+# heartbeat so the stuck-run reaper cannot mistake a slow dive for a dead worker.
+try:
+    SCAN_HEARTBEAT_SECONDS = float(os.environ.get("SCAN_HEARTBEAT_SECONDS", "120"))
+    if SCAN_HEARTBEAT_SECONDS <= 0:
+        SCAN_HEARTBEAT_SECONDS = 120.0
+except (ValueError, TypeError):
+    SCAN_HEARTBEAT_SECONDS = 120.0
+
+
+class _Heartbeat:
+    """Keeps spy_scans.updated_at fresh during long LLM calls.
+
+    The stuck-run reaper (``web/scheduler.py STUCK_SCAN_STALL_MIN``) keys off
+    updated_at; without a heartbeat a slow-but-healthy dive could be mistaken for
+    a dead worker and reaped. ``db.update_spy_scan`` always stamps updated_at.
+    """
+
+    def __init__(self, beat: Callable[[], None], interval: float | None = None):
+        self._beat = beat
+        self._interval_arg = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._resolved_interval: float = 120.0
+
+    def __enter__(self) -> _Heartbeat:
+        self._resolved_interval = (
+            self._interval_arg if self._interval_arg is not None else SCAN_HEARTBEAT_SECONDS
+        )
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="scan-heartbeat", daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._resolved_interval):
+            try:
+                self._beat()
+            except Exception:
+                log.warning("[spy] heartbeat write failed", exc_info=True)
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        return False
+
 
 
 def _dominant_error(rows: list[dict[str, Any]]) -> str:
@@ -825,49 +876,49 @@ def run_quick_scan(
         quick_reused,
         len(pre_rows) - quick_reused,
     )
-
-    with _GateMonitor(DynamicGate(budget)) as gate:
-        def _scan_batch(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            if db.is_spy_scan_cancelled(scan_id):
-                return [
-                    {
-                        "ticker": r["ticker"],
-                        "signal": "HOLD",
-                        "conviction": 0,
-                        "reasoning": "cancelled",
-                        "entry_price": 0.0,
-                        "skipped": True,
-                    }
-                    for r in rows
-                ]
-            if len(rows) == 1:
-                r = rows[0]
-                return [_quick_scan_one(r["ticker"], r["price_data"], r["sector"], llm, gate)]
-            return _quick_scan_batch(rows, llm, gate)
-
-        with ThreadPoolExecutor(max_workers=budget) as pool:
-            futures = {pool.submit(_scan_batch, batch): batch for batch in batches}
-            for fut in as_completed(futures):
-                # Drop the entry as soon as this result is consumed. Left in
-                # place, every completed Future (holding its full result list —
-                # reasoning/error text included) stays referenced for the rest
-                # of the scan even after nothing needs it, pinning up to 500
-                # results in memory that GC can't reclaim. Same shape as the
-                # cleo fix in scripts/cleo_llm_handler.py (commit 15f3a2a):
-                # never hold more than necessary once it's been consumed.
-                del futures[fut]
-                batch_rows = fut.result()
-                for row in batch_rows:
-                    if row.get("skipped"):
-                        continue
-                    _record(row)
-                db.update_spy_scan(scan_id, quick_count=completed)
-                log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
-
+    with _Heartbeat(lambda: db.update_spy_scan(scan_id, quick_count=completed)):
+        with _GateMonitor(DynamicGate(budget)) as gate:
+            def _scan_batch(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if db.is_spy_scan_cancelled(scan_id):
-                    log.info("[spy %s] cancellation requested — stopping quick scan", scan_id)
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise ScanCancelled()
+                    return [
+                        {
+                            "ticker": r["ticker"],
+                            "signal": "HOLD",
+                            "conviction": 0,
+                            "reasoning": "cancelled",
+                            "entry_price": 0.0,
+                            "skipped": True,
+                        }
+                        for r in rows
+                    ]
+                if len(rows) == 1:
+                    r = rows[0]
+                    return [_quick_scan_one(r["ticker"], r["price_data"], r["sector"], llm, gate)]
+                return _quick_scan_batch(rows, llm, gate)
+
+            with ThreadPoolExecutor(max_workers=budget) as pool:
+                futures = {pool.submit(_scan_batch, batch): batch for batch in batches}
+                for fut in as_completed(futures):
+                    # Drop the entry as soon as this result is consumed. Left in
+                    # place, every completed Future (holding its full result list —
+                    # reasoning/error text included) stays referenced for the rest
+                    # of the scan even after nothing needs it, pinning up to 500
+                    # results in memory that GC can't reclaim. Same shape as the
+                    # cleo fix in scripts/cleo_llm_handler.py (commit 15f3a2a):
+                    # never hold more than necessary once it's been consumed.
+                    del futures[fut]
+                    batch_rows = fut.result()
+                    for row in batch_rows:
+                        if row.get("skipped"):
+                            continue
+                        _record(row)
+                    db.update_spy_scan(scan_id, quick_count=completed)
+                    log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
+
+                    if db.is_spy_scan_cancelled(scan_id):
+                        log.info("[spy %s] cancellation requested — stopping quick scan", scan_id)
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise ScanCancelled()
 
     db.update_spy_scan(scan_id, quick_count=completed)
 
@@ -1217,37 +1268,38 @@ def run_deep_dives(
             return {**c, "error": str(exc), "analysis_id": analysis_id}
 
     # DynamicGate(budget) is deliberate: the gate caps LLM concurrency; the pool is only admission width.
-    with _GateMonitor(DynamicGate(budget)) as gate:
-        # Plain fixed-limit gate for the duration of this scan. Cross-
-        # container coordination of tool-fetch traffic is out of scope for
-        # this fix; a single scan-scoped gate is sufficient to restore the
-        # order-of-magnitude bound the legacy whole-dive permit provided.
-        tool_gate = DynamicGate(_deep_dive_tool_concurrency(budget))
-        log.info(
-            "[spy %s] deep dive: tool-fetch concurrency=%d",
-            scan_id, tool_gate.limit,
-        )
-        with ThreadPoolExecutor(max_workers=pool_size) as pool:
-            futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
-            for fut in as_completed(futures):
-                # See run_quick_scan's identical del — drop the entry once
-                # consumed so a completed dive's full result (analysis state,
-                # decision text) doesn't stay pinned for the rest of the scan.
-                del futures[fut]
-                result = fut.result()
-                if result.get("skipped"):
-                    continue
-                enriched.append(result)
-                completed += 1
-                if result.get("reused_from") is not None:
-                    reused += 1
-                db.update_spy_scan(scan_id, deep_count=completed, deep_reused_count=reused)
-                log.info("[spy %s] deep dive %d/%d: %s", scan_id, completed, len(candidates), result["ticker"])
+    with _Heartbeat(lambda: db.update_spy_scan(scan_id, deep_count=completed, deep_reused_count=reused)):
+        with _GateMonitor(DynamicGate(budget)) as gate:
+            # Plain fixed-limit gate for the duration of this scan. Cross-
+            # container coordination of tool-fetch traffic is out of scope for
+            # this fix; a single scan-scoped gate is sufficient to restore the
+            # order-of-magnitude bound the legacy whole-dive permit provided.
+            tool_gate = DynamicGate(_deep_dive_tool_concurrency(budget))
+            log.info(
+                "[spy %s] deep dive: tool-fetch concurrency=%d",
+                scan_id, tool_gate.limit,
+            )
+            with ThreadPoolExecutor(max_workers=pool_size) as pool:
+                futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
+                for fut in as_completed(futures):
+                    # See run_quick_scan's identical del — drop the entry once
+                    # consumed so a completed dive's full result (analysis state,
+                    # decision text) doesn't stay pinned for the rest of the scan.
+                    del futures[fut]
+                    result = fut.result()
+                    if result.get("skipped"):
+                        continue
+                    enriched.append(result)
+                    completed += 1
+                    if result.get("reused_from") is not None:
+                        reused += 1
+                    db.update_spy_scan(scan_id, deep_count=completed, deep_reused_count=reused)
+                    log.info("[spy %s] deep dive %d/%d: %s", scan_id, completed, len(candidates), result["ticker"])
 
-                if db.is_spy_scan_cancelled(scan_id):
-                    log.info("[spy %s] cancellation requested — stopping deep dives", scan_id)
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise ScanCancelled()
+                    if db.is_spy_scan_cancelled(scan_id):
+                        log.info("[spy %s] cancellation requested — stopping deep dives", scan_id)
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise ScanCancelled()
 
     if reused:
         log.info("[spy %s] deep dive: reused %d/%d shared-stage analyses", scan_id, reused, len(enriched))
@@ -1398,6 +1450,55 @@ def _format_rebalance_notes(
     return stopped_section or flips_section
 
 
+def fetch_live_prices(tickers: list[str], *, log_label: str = "prices") -> dict[str, float]:
+    """Fetch last close/market prices for ``tickers``.
+
+    Dedupes ``tickers`` while preserving order. An empty list returns ``{}``
+    without calling any price source. Schwab market data is tried first; on
+    failure or when no prices are returned, falls back to yfinance. A yfinance
+    exception propagates to the caller so the caller can decide whether to
+    treat it as a total outage or a transient failure.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in tickers:
+        if t not in seen:
+            unique.append(t)
+            seen.add(t)
+    if not unique:
+        return {}
+
+    current_prices: dict[str, float] = {}
+    if schwab_mcp.market_data_enabled():
+        try:
+            quotes = schwab_mcp.get_quotes(unique)
+            if quotes:
+                for t in unique:
+                    p = schwab_mcp.quote_price(quotes.get(t, {}))
+                    if p:
+                        current_prices[t] = p
+                if current_prices:
+                    log.info("[%s] priced %d/%d via Schwab", log_label, len(current_prices), len(unique))
+        except Exception:
+            log.exception("[%s] Schwab quotes failed; using yfinance", log_label)
+
+    if not current_prices:
+        prices_df = yf.download(unique, period="1d", auto_adjust=True, progress=False)
+        if hasattr(prices_df.columns, "levels"):
+            current_prices = {
+                t: float(prices_df["Close"][t].dropna().iloc[-1])
+                for t in unique
+                if t in prices_df["Close"] and not prices_df["Close"][t].dropna().empty
+            }
+        else:
+            current_prices = (
+                {unique[0]: float(prices_df["Close"].dropna().iloc[-1])}
+                if unique and not prices_df.empty else {}
+            )
+
+    return current_prices
+
+
 def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     """Mark the scan's paper portfolio to market and persist per-position P&L.
 
@@ -1444,38 +1545,11 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
 
     tickers = [a["ticker"] for a in portfolio]
 
-    # Prefer real-time Schwab quotes (one bulk call); fall back to yfinance.
-    current_prices: dict[str, float] = {}
-    if schwab_mcp.market_data_enabled():
-        try:
-            quotes = schwab_mcp.get_quotes(tickers)
-            if quotes:
-                for t in tickers:
-                    p = schwab_mcp.quote_price(quotes.get(t, {}))
-                    if p:
-                        current_prices[t] = p
-                if current_prices:
-                    log.info("[spy %s] priced %d/%d via Schwab", scan_id, len(current_prices), len(tickers))
-        except Exception:
-            log.exception("[spy %s] Schwab quotes failed; using yfinance", scan_id)
-
-    if not current_prices:
-        try:
-            prices_df = yf.download(tickers, period="1d", auto_adjust=True, progress=False)
-            if hasattr(prices_df.columns, "levels"):
-                current_prices = {
-                    t: float(prices_df["Close"][t].dropna().iloc[-1])
-                    for t in tickers
-                    if t in prices_df["Close"] and not prices_df["Close"][t].dropna().empty
-                }
-            else:
-                current_prices = (
-                    {tickers[0]: float(prices_df["Close"].dropna().iloc[-1])}
-                    if tickers and not prices_df.empty else {}
-                )
-        except Exception as exc:
-            log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
-            return {"error": str(exc)}
+    try:
+        current_prices = fetch_live_prices(tickers, log_label=f"spy {scan_id}")
+    except Exception as exc:
+        log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
+        return {"error": str(exc)}
 
     # Total quote outage: at least one live position needs a mark but no price
     # source produced any prices. This covers the empty-DataFrame yfinance

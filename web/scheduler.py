@@ -51,8 +51,9 @@ TIMEZONE = os.environ.get("SCHEDULER_TIMEZONE", "America/New_York")
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net").rstrip("/")
 
 # Stuck-run reaper thresholds (minutes). A run quiet past its limit is treated as a
-# crashed worker. Generous defaults so a slow-but-healthy deep dive isn't reaped.
-STUCK_SCAN_STALL_MIN = int(os.environ.get("STUCK_SCAN_STALL_MIN", "60"))
+# crashed worker. The scan heartbeat (every 2 min by default) keeps live scans fresh,
+# so 120 only trips on a dead worker.
+STUCK_SCAN_STALL_MIN = int(os.environ.get("STUCK_SCAN_STALL_MIN", "120"))
 STUCK_ANALYSIS_MIN = int(os.environ.get("STUCK_ANALYSIS_MIN", "90"))
 
 _ALERT_DETAIL_MAX = 400  # cap response bodies/tracebacks embedded in scheduler alerts

@@ -6,6 +6,7 @@ context but never stored its own decisions — the highest-volume decision path
 """
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -361,3 +362,176 @@ class TestQuickScanPriceDataCache:
         assert m1["CCC"]["close"] == []
         assert m1["CCC"]["volume"] == []
         assert m1 == m2
+
+
+class TestHeartbeat:
+    """_Heartbeat stamps spy_scans.updated_at from a background thread."""
+
+    def test_heartbeat_beats_while_inside_and_stops_after_exit(self):
+        calls = []
+
+        def beat():
+            n = len(calls)
+            calls.append(n)
+            if n == 3:
+                raise RuntimeError("heartbeat boom")
+
+        with spy_scanner._Heartbeat(beat, interval=0.02):
+            time.sleep(0.18)
+
+        inside_count = len(calls)
+        assert inside_count >= 2
+        assert 3 in calls  # the 4th beat happened and raised
+        assert inside_count >= 4  # beating continued after the swallowed exception
+        final = len(calls)
+        time.sleep(0.1)
+        assert len(calls) == final
+
+    def test_heartbeat_touches_scan_while_dives_in_flight(self, tmp_db, monkeypatch, tmp_path):
+        monkeypatch.setattr(spy_scanner, "SCAN_HEARTBEAT_SECONDS", 0.05)
+
+        def _fake_cls(memory_log, *, sleep_seconds=0.3):
+            class FakeOrchestrator:
+                def __init__(self, config=None, selected_analysts=None, **kw):
+                    self.memory_log = memory_log
+
+                def run(self, ticker, trade_date, **kw):
+                    time.sleep(sleep_seconds)
+                    return {"final_trade_decision": "Rating: Buy"}, "BUY"
+
+            return FakeOrchestrator
+
+        memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "mem.md")})
+        monkeypatch.setattr(
+            spy_scanner,
+            "SwitchboardOrchestrator",
+            _fake_cls(memory_log, sleep_seconds=0.3),
+        )
+
+        recorded = []
+        real_update = spy_scanner.db.update_spy_scan
+
+        def recorder(scan_id, **kwargs):
+            recorded.append((threading.current_thread().name, kwargs))
+            return real_update(scan_id, **kwargs)
+
+        monkeypatch.setattr(spy_scanner.db, "update_spy_scan", recorder)
+
+        scan_id = db.create_spy_scan("2026-08-08", kind="options")
+        config = {"deep_dive_reuse": False}
+        candidates = [{"ticker": "AAPL", "signal": "BUY", "conviction": 8}]
+
+        spy_scanner.run_deep_dives(scan_id, candidates, "2026-08-08", config, ["market"])
+
+        heartbeat_calls = [
+            r for r in recorded
+            if r[0] == "scan-heartbeat" and "deep_count" in r[1]
+        ]
+        assert len(heartbeat_calls) >= 2
+
+
+class TestFetchLivePrices:
+    """fetch_live_prices prefers Schwab and falls back to yfinance."""
+
+    @staticmethod
+    def _price_frame(tickers, n=2):
+        n = max(n, 2)
+        data = {}
+        for i, t in enumerate(tickers):
+            data[("Close", t)] = [float(100 + i * 10 + j) for j in range(n)]
+        return pd.DataFrame(data)
+
+    @staticmethod
+    def _single_price_frame(ticker, n=2):
+        n = max(n, 2)
+        return pd.DataFrame({"Close": [float(100 + j) for j in range(n)]})
+
+    def test_schwab_enabled_returns_schwab_prices(self, monkeypatch):
+        def _download(*a, **kw):
+            raise AssertionError("yf.download should not be called when Schwab prices are available")
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+
+        def _get_quotes(tickers):
+            return {t: {"lastPrice": 100.0 + ord(t[0])} for t in tickers}
+
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "get_quotes", _get_quotes)
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "quote_price", lambda q: q.get("lastPrice"))
+
+        prices = spy_scanner.fetch_live_prices(["AAPL", "MSFT", "AAPL"], log_label="test")
+        assert prices == {"AAPL": 165.0, "MSFT": 177.0}
+
+    def test_schwab_raises_falls_back_to_yf(self, monkeypatch):
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(
+            spy_scanner.schwab_mcp,
+            "get_quotes",
+            lambda t: (_ for _ in ()).throw(RuntimeError("schwab down")),
+        )
+        monkeypatch.setattr(
+            spy_scanner.yf,
+            "download",
+            lambda tickers, *a, **kw: self._price_frame(tickers),
+        )
+        prices = spy_scanner.fetch_live_prices(["AAPL", "MSFT"])
+        assert prices == {"AAPL": 101.0, "MSFT": 111.0}
+
+    def test_schwab_returns_no_prices_falls_back_to_yf(self, monkeypatch):
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "get_quotes", lambda t: {})
+        monkeypatch.setattr(
+            spy_scanner.yf,
+            "download",
+            lambda tickers, *a, **kw: self._price_frame(tickers),
+        )
+        prices = spy_scanner.fetch_live_prices(["AAPL", "MSFT"])
+        assert prices == {"AAPL": 101.0, "MSFT": 111.0}
+
+    def test_single_ticker_yf_frame(self, monkeypatch):
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: False)
+        monkeypatch.setattr(
+            spy_scanner.yf,
+            "download",
+            lambda tickers, *a, **kw: self._single_price_frame(tickers[0]),
+        )
+        prices = spy_scanner.fetch_live_prices(["AAPL"])
+        assert prices == {"AAPL": 101.0}
+
+    def test_yf_raises_propagates(self, monkeypatch):
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: False)
+        monkeypatch.setattr(
+            spy_scanner.yf,
+            "download",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("yf down")),
+        )
+        with pytest.raises(RuntimeError, match="yf down"):
+            spy_scanner.fetch_live_prices(["AAPL"])
+
+    def test_empty_list_returns_empty(self):
+        assert spy_scanner.fetch_live_prices([]) == {}
+
+    def test_refresh_portfolio_prices_returns_error_on_yf_failure(self, tmp_db, monkeypatch):
+        scan_id = db.create_spy_scan("2026-08-08", kind="equity")
+        db.complete_spy_scan(
+            scan_id,
+            allocator_report="",
+            portfolio_json=[
+                {
+                    "ticker": "AAPL",
+                    "signal": "BUY",
+                    "action": "NEW",
+                    "entry_price": 150.0,
+                    "shares": 10,
+                    "dollar_amount": 1500.0,
+                }
+            ],
+        )
+        monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: False)
+        monkeypatch.setattr(
+            spy_scanner.yf,
+            "download",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("market data down")),
+        )
+        result = spy_scanner.refresh_portfolio_prices(scan_id)
+        assert result == {"error": "market data down"}
