@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time as time_mod
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -558,6 +559,40 @@ class TestWaitForMarketOpenHolidayAware:
         )
         research_engine.wait_for_market_open(scan_id)
         assert db.get_spy_scan_status(scan_id)["status"] == "pending"
+
+
+class TestWaitForMarketOpenAfterClose:
+    """A trading day at/after MARKET_CLOSE_ET refuses rather than fill post-close."""
+
+    def _patch(self, monkeypatch, when):
+        monkeypatch.setattr(market_calendar, "now_et", lambda: when)
+        monkeypatch.setattr(
+            research_engine.time_mod, "sleep",
+            lambda _s: (_ for _ in ()).throw(AssertionError("should not sleep")),
+        )
+
+    @pytest.mark.parametrize("hm", [(16, 0), (18, 0), (23, 59)])
+    def test_trading_day_after_close_raises(self, monkeypatch, tmp_db, hm):
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+        self._patch(monkeypatch, datetime(2026, 6, 1, *hm, tzinfo=market_calendar._ET))
+        with pytest.raises(research_engine.MarketClosed, match="post-close"):
+            research_engine.wait_for_market_open(scan_id)
+        assert db.get_spy_scan_status(scan_id)["status"] == "pending"
+
+    def test_trading_day_just_before_close_returns(self, monkeypatch, tmp_db):
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+        self._patch(monkeypatch, datetime(2026, 6, 1, 15, 59, tzinfo=market_calendar._ET))
+        research_engine.wait_for_market_open(scan_id)
+
+    def test_saturday_evening_still_returns(self, monkeypatch, tmp_db):
+        scan_id = db.create_spy_scan("2026-06-06", kind="options")
+        self._patch(monkeypatch, datetime(2026, 6, 6, 18, 0, tzinfo=market_calendar._ET))
+        research_engine.wait_for_market_open(scan_id)
+
+    def test_holiday_evening_still_returns(self, monkeypatch, tmp_db):
+        scan_id = db.create_spy_scan("2026-11-26", kind="options")
+        self._patch(monkeypatch, datetime(2026, 11, 26, 18, 0, tzinfo=market_calendar._ET))
+        research_engine.wait_for_market_open(scan_id)
 
 
 # ── Research orchestration ───────────────────────────────────────────────────
@@ -1160,6 +1195,53 @@ def test_run_allocation_allocate_error_propagates_and_releases_lock(seeded_alloc
     with pytest.raises(ValueError, match="bad allocation"):
         research_engine.run_allocation(s.sid, s.td, allocate)
     assert research_engine._ALLOC_LOCK.locked() is False
+
+
+def test_run_allocation_after_close_refuses_before_waiting(seeded_allocation, clock):
+    s = seeded_allocation
+    clock.now = _et(2026, 9, 29, 18, 0)  # e.g. a manual "Allocate now" at 18:00
+    calls: list[Any] = []
+
+    with pytest.raises(research_engine.MarketClosed):
+        research_engine.run_allocation(s.sid, s.td, calls.append)
+
+    assert calls == []
+    assert s.price_calls == []
+    assert research_engine._ALLOC_LOCK.locked() is False
+
+
+def test_run_allocation_rechecks_close_after_lock(seeded_allocation, clock, monkeypatch):
+    """Queuing behind other accounts on the lock must not slide fills past the close."""
+    s = seeded_allocation
+    real_slot = research_engine._allocation_slot
+
+    @contextmanager
+    def slow_slot(scan_id):
+        with real_slot(scan_id):
+            clock.now = _et(2026, 9, 29, 16, 5)  # lock wait ran past the close
+            yield
+
+    monkeypatch.setattr(research_engine, "_allocation_slot", slow_slot)
+    statuses = _record_statuses(monkeypatch, s.sid)
+    calls: list[Any] = []
+
+    with pytest.raises(research_engine.MarketClosed, match="post-close"):
+        research_engine.run_allocation(s.sid, s.td, calls.append)
+
+    assert calls == []
+    assert s.price_calls == []
+    assert "running_alloc" not in statuses
+    assert research_engine._ALLOC_LOCK.locked() is False
+
+
+def test_run_allocation_saturday_evening_forced_run_proceeds(seeded_allocation, clock):
+    s = seeded_allocation
+    clock.now = _et(2026, 10, 3, 18, 0)  # Saturday
+    calls: list[Any] = []
+
+    research_engine.run_allocation(s.sid, s.td, calls.append)
+
+    assert len(calls) == 1
 
 
 def test_run_allocation_requires_paper_account(tmp_db, clock):

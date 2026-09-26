@@ -236,11 +236,33 @@ def select_deep_dive_targets(quick_results: list[dict[str, Any]]) -> list[dict[s
 _MARKET_POLL_SECONDS = 30.0
 
 
+class MarketClosed(Exception):
+    """Raised when an allocation would fill after the regular session closed."""
+
+
+def _refuse_after_close(now: datetime) -> None:
+    """Raise MarketClosed at/after MARKET_CLOSE_ET on an NYSE trading day.
+
+    Weekends and holidays pass (forced manual runs stay possible there).
+    """
+    if (market_calendar.is_trading_day(now.date())
+            and (now.hour, now.minute) >= market_calendar.MARKET_CLOSE_ET):
+        close_h, close_m = market_calendar.MARKET_CLOSE_ET
+        raise MarketClosed(
+            f"regular session closed at {close_h:02d}:{close_m:02d} ET "
+            f"(now {now:%H:%M} ET) — entries would fill at post-close quotes; "
+            "allocate on the next trading day"
+        )
+
+
 def wait_for_market_open(scan_id: int) -> None:
     """Block until MARKET_OPEN_ET on NYSE trading days so entries fill at live mids.
 
     Weekends and NYSE holidays return immediately, which preserves the ability
-    to force a manual run on a non-trading day. Heartbeats update the scan row
+    to force a manual run on a non-trading day. On a trading day at or after
+    MARKET_CLOSE_ET this raises MarketClosed instead of returning, so a late
+    manual click or a post-close schedule_time never fills at after-hours
+    quotes. Heartbeats update the scan row
     every ~3 minutes so the stuck-run reaper doesn't mistake the wait for a
     crashed worker.
 
@@ -254,7 +276,10 @@ def wait_for_market_open(scan_id: int) -> None:
     ticks = 0
     while True:
         now = market_calendar.now_et()
-        if not market_calendar.is_trading_day(now.date()) or (now.hour, now.minute) >= market_calendar.MARKET_OPEN_ET:
+        if not market_calendar.is_trading_day(now.date()):
+            return
+        _refuse_after_close(now)
+        if (now.hour, now.minute) >= market_calendar.MARKET_OPEN_ET:
             return
         if db.is_spy_scan_cancelled(scan_id):
             raise spy_scanner.ScanCancelled()
@@ -611,7 +636,10 @@ def run_allocation(
     current holdings) and hands an AllocationContext to ``allocate``.
 
     Callers own completion (``complete_spy_scan``). The ~1 min of post-open
-    work runs one account at a time under the global lock.
+    work runs one account at a time under the global lock. On a trading day
+    at or after MARKET_CLOSE_ET it raises MarketClosed (checked before the
+    wait and again once the lock is held) rather than fill at post-close
+    quotes.
     """
     # (0) setup
     scan = db.get_spy_scan(scan_id) or {}
@@ -653,6 +681,9 @@ def run_allocation(
 
     # (4) allocate under the global lock
     with _allocation_slot(scan_id):
+        # The lock can queue behind other accounts; don't let that slide the
+        # fill past the close.
+        _refuse_after_close(market_calendar.now_et())
         db.update_spy_scan(scan_id, status="running_alloc")
         usable = [dict(r) for r in db.list_deep_dived_results(research["id"])]
         tickers: list[str] = []
