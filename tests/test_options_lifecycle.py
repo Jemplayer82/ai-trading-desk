@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import pytest
 
-from web import db, market_cache, options_engine
+from web import db, market_cache, options_data, options_engine
 from web.account_policy import StopPolicy
 
 pytestmark = pytest.mark.unit
@@ -487,6 +487,13 @@ def _policies(account_id, policy):
     return {account_id: policy}
 
 
+def _freeze_et(monkeypatch, when: datetime) -> None:
+    """Pin the ET clock the options path reads (by module attribute) so tests
+    that open hardcoded-expiry contracts don't rot once that date passes."""
+    monkeypatch.setattr(options_data, "today_et", lambda: when.date())
+    monkeypatch.setattr(options_data, "now_et", lambda: when)
+
+
 def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch):
     """Prev mark above the stop, fresh quote below it -> the level was crossed
     this interval, so the fill is AT the stop (standing-stop emulation), not at
@@ -843,6 +850,7 @@ def test_intraday_stop_limit_crosses_fills_immediately(account_id, monkeypatch):
 
 
 def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypatch):
+    _freeze_et(monkeypatch, datetime(2026, 7, 20, 11, 0, tzinfo=options_data._ET))
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
 
     # Create a second options account with a trailing-pct policy.
