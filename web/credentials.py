@@ -142,6 +142,10 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "ALPACA_API_SECRET", "label": "Alpaca API Secret", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API secret"},  # pragma: allowlist secret
     {"key": "ALPACA_BASE_URL", "label": "Alpaca Base URL", "group": "Brokerage (Alpaca)", "secret": False, "placeholder": "https://api.alpaca.markets"},
     # TIER:2 END
+    # TIER:3 BEGIN
+    # Shared daily research start time (Mon-Fri, SCHEDULER_TIMEZONE); read at reconcile time by web/scheduler.py research_time(), so edits apply within ~60 s.
+    {"key": "SCHEDULE_RESEARCH_TIME", "label": "Daily shared research start (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "00:00 — Mon-Fri; the one research pass every paper account allocates from"},  # pragma: allowlist secret
+    # TIER:3 END
 ]
 
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}
