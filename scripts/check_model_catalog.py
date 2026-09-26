@@ -133,7 +133,7 @@ def catalog_model_ids() -> dict[str, set[str]]:
     """Claude IDs in our catalog, keyed by the provider that offers them.
 
     Only ``claude-*`` values are model IDs. The switchboard menu also carries
-    the bare CLI family aliases (``opus``/``sonnet``/``haiku``), which resolve
+    the bare CLI family aliases (``opus``/``sonnet``/``fable``), which resolve
     at call time and by design never appear in Anthropic's ID list — checking
     them here would report permanent false drift. ``llama3`` and the ``custom``
     UI sentinel are skipped for the same reason.

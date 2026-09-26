@@ -115,7 +115,7 @@ All optional env vars are documented in [`cleo.env.example`](cleo.env.example).
 | `SWITCHBOARD_URL` | — | Switchboard base URL, no trailing `/mcp` (e.g. `http://host:3109`) |
 | `SWITCHBOARD_MCP_TOKEN` | — | Bearer token — must match the stack's `SWITCHBOARD_MCP_TOKEN` |
 | `SWITCHBOARD_AGENT_ID` | `cleo` | Bus agent name — change if you run multiple Cleo instances |
-| `DEFAULT_MODEL` | `claude-sonnet-5` | Fallback model when the request doesn't specify one |
+| `DEFAULT_MODEL` | `sonnet` (always-latest alias) | Fallback model when the request doesn't specify one |
 | `CLEO_CALL_TIMEOUT_S` | `150` | Hard per-call ceiling in seconds — keep below the client's 180s so Cleo fails itself first |
 | `CLAUDE_BIN` | `claude` | Full path to the `claude` binary if it isn't on `PATH` for the service user |
 | `CLEO_LOCK_FILE` | `/tmp/cleo-<agent_id>.lock` | Single-instance flock path — override if `/tmp` is on a tmpfs that's shared across hosts |

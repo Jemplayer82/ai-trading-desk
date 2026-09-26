@@ -210,26 +210,28 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # and are the route the deployed stack actually uses. Values are handed to
     # `claude --model` verbatim; non-Claude entries fall through to llm-router.
     #
-    # THIS is the one provider where an always-latest name genuinely exists.
+    # THIS is the one provider where an always-latest name genuinely exists,
+    # and since 2026-09-26 it offers ONLY those names (Landon: "get rid of the
+    # pinned and just make it where it runs the latest version of each model").
     # The Claude CLI resolves the bare family names at call time (verified on
-    # WebServer, CLI 2.1.220, 2026-08-06):
+    # WebServer, CLI 2.1.283, 2026-09-26):
     #
-    #     opus   -> claude-opus-5
+    #     opus   -> claude-opus-5-5
     #     sonnet -> claude-sonnet-5
-    #     haiku  -> claude-haiku-4-5-20251001  (resolves fine; not offered here — see below)
+    #     fable  -> claude-fable-5-1   (deep only: thinking is always on, ~24 s
+    #                                   for a one-word reply — too slow for the
+    #                                   quick/analyst path, never the default)
+    #     haiku  -> claude-haiku-4-5-20251001  (resolves fine; not offered — see below)
     #
-    # They lead each list, which makes them the default for background scans —
-    # web/runner.py::_catalog_default takes the first non-"custom" entry. The
-    # pinned IDs stay below them as the escape hatch.
+    # The first entry of each list is the default for background scans —
+    # web/runner.py::_catalog_default takes the first non-"custom" entry.
+    # To pin a specific snapshot anyway, type its ID into "Custom model ID".
     #
-    # The tradeoff, spelled out because it is the same one that got the
-    # version-less Qwen aliases excluded above: an always-latest name means the
-    # model under your analysis changes the day Anthropic ships the next one,
-    # with no commit and no warning. That is fine for ad-hoc runs and awkward
-    # for anything that compares results over time — the options reflection
-    # corpus (web/options_learning.py) is graded by whatever model was current
-    # when each entry was written. Pin a specific ID for work that needs to
-    # stay comparable.
+    # The tradeoff: an always-latest name means the model under your analysis
+    # changes the day Anthropic ships the next one, with no commit and no
+    # warning. That is what these menus now choose deliberately; anything that
+    # must stay comparable over time (e.g. the options reflection corpus in
+    # web/options_learning.py) should pin a snapshot via Custom model ID.
     # ⚠️ TOOL-CALL RELIABILITY — two bugs fixed here 2026-08-06, both worth
     # knowing about before trusting a model choice on this provider.
     #
@@ -288,18 +290,15 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # aimed at operators, not code readers.
     "switchboard": {
         "quick": [
-            ("Sonnet — always latest (via bus)", "sonnet"),
-            ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
-            ("Claude Sonnet 4.6 — pinned (via bus)", "claude-sonnet-4-6"),
+            ("Sonnet — latest (via bus)", "sonnet"),
+            ("Opus — latest, slower (via bus)", "opus"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("Opus — always latest (via bus)", "opus"),
-            ("Sonnet — always latest, cheaper (via bus)", "sonnet"),
-            ("Claude Opus 5 — pinned (via bus)", "claude-opus-5"),
-            ("Claude Opus 4.8 — pinned (via bus)", "claude-opus-4-8"),
-            ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
+            ("Opus — latest (via bus)", "opus"),
+            ("Fable — latest, most capable, slowest (via bus)", "fable"),
+            ("Sonnet — latest, faster (via bus)", "sonnet"),
             ("Custom model ID", "custom"),
         ],
     },

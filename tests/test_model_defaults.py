@@ -94,11 +94,15 @@ def test_haiku_is_not_offered_on_switchboard():
         assert not any("haiku" in v.lower() for v in values), (mode, values)
 
 
-def test_switchboard_still_offers_pinned_ids_below_the_aliases():
-    """The aliases are the default, not the only option — anything that needs
-    to stay comparable over time has to be able to pin a snapshot."""
+def test_switchboard_offers_only_always_latest_aliases():
+    """Landon 2026-09-26: no pinned snapshots in the switchboard menus — every
+    entry runs the latest model of its family. Pinning stays possible through
+    the "custom" entry, which must remain in both lists."""
     from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 
     for mode in ("quick", "deep"):
         values = [v for _, v in MODEL_OPTIONS["switchboard"][mode]]
-        assert any(v.startswith("claude-") for v in values), mode
+        assert not any(v.startswith("claude-") for v in values), (mode, values)
+        assert "custom" in values, mode
+    assert "fable" in [v for _, v in MODEL_OPTIONS["switchboard"]["deep"]]
+    assert "fable" not in [v for _, v in MODEL_OPTIONS["switchboard"]["quick"]]

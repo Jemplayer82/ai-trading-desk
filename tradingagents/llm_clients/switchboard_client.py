@@ -126,7 +126,7 @@ class SwitchboardChatModel(BaseChatModel):
     token: str = Field(default="")  # pragma: allowlist secret
     self_agent_id: str = Field(default="tradingagents-llm")
     target_agent_id: str = Field(default="llm-router")
-    model_name: str = Field(default="claude-sonnet-5")
+    model_name: str = Field(default="sonnet")
     provider: str = Field(default="")
     timeout_s: float = Field(default=180.0)
     # Optional per-token callback set by the orchestrator. Called with each text
