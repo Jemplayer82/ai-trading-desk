@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -35,6 +33,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from tradingagents.dataflows import schwab_mcp
 
 from . import account_policy, alerts, db, scan_queue, spy_allocator, spy_scanner
+from .research_engine import _phase
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -472,21 +471,6 @@ def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
         )
     finally:
         scan_queue._dequeue_next_scan()
-
-
-@contextmanager
-def _phase(label: str) -> Iterator[None]:
-    """Tag any failure inside a scan phase with a human-readable prefix.
-
-    A user-initiated cancellation (ScanCancelled) is passed through untouched
-    so it is recorded as 'cancelled', not 'failed'.
-    """
-    try:
-        yield
-    except spy_scanner.ScanCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001 — re-raised with friendlier context
-        raise RuntimeError(f"{label}: {exc}") from exc
 
 
 def _run_spy_scan(scan_id: int, trade_date: str) -> None:

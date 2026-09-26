@@ -2,7 +2,7 @@
 
 These tests live at the tier-independent layer (`web.market_cache`) so
 they survive builds where tier-gated modules such as `web.spy_scanner.py`
-or `web.options_engine.py` are removed.
+or `web.research_engine.py` are removed.
 """
 
 from __future__ import annotations
@@ -147,5 +147,5 @@ def test_concurrent_get_put_smoke():
 def test_no_compute_under_lock_api():
     # SameDayCache deliberately exposes no get_or_compute helper.  Holding
     # a lock across a long-running yfinance download would serialize fetches
-    # and create lock-ordering hazards against options_engine._ALLOC_LOCK.
+    # and create lock-ordering hazards against research_engine._ALLOC_LOCK.
     assert not hasattr(SameDayCache, "get_or_compute")

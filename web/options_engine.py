@@ -11,6 +11,11 @@ Pipeline (run_options_build, behind POST /api/options-scan, cron Mon-Fri):
 Options runs are spy_scans rows with kind='options', so progress counters,
 cooperative cancel, and the stuck-run reaper all work unchanged.
 
+The pre-screen, target selection, market-open wait and allocation lock now
+live in ``web/research_engine.py`` (shared tier-3 code). This module imports
+them and continues to own the options-specific chain fetching, allocation,
+and position bookkeeping.
+
 Also owns the two standing maintenance passes:
   settle_expired    — idempotent expiry settlement (safety net; the DTE floor
                       force-close means it mostly fires after downtime),
@@ -22,13 +27,7 @@ exposes market data and account reads exclusively.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
-import threading
-import time as time_mod
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -39,261 +38,27 @@ from tradingagents.dataflows import schwab_mcp
 from . import (
     account_policy,
     db,
-    market_cache,
     options_allocator,
     options_data,
     options_learning,
-    scan_queue,
     spy_scanner,
+)
+from .research_engine import (
+    ALWAYS_DEEP,
+    PRESCREEN_TOP,
+    _allocation_slot,
+    _phase,
+    prescreen,
+    select_deep_dive_targets,
+    wait_for_market_open,
 )
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
-PRESCREEN_TOP = 150     # top movers (by momentum/volume) that get the quick LLM scan
-DEEP_TOP = 50           # directional names that get the full agent graph
-ALWAYS_DEEP = ("SPY",)  # tickers guaranteed a deep dive every run, HOLD or not
-MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour
 STALE_ALERT_THRESHOLD = 3
-
-# Same-day cache of the movers pre-screen. All three daily options
-# accounts run the identical screen over the identical (24h-cached)
-# S&P 500 universe, each otherwise paying its own ~500-ticker
-# yf.download. trade_date scoping means a result can never be served
-# into a later trading day; the 4h TTL means a build kicked off
-# manually in the afternoon re-screens rather than trading off a stale
-# morning list.
-_PRESCREEN_TTL_SECONDS = 4 * 3600
-
-# A pre-screen built from fewer than 80% of the requested tickers is treated
-# as a degraded download. The truncated result is still returned to the
-# caller, but a degraded movers list is not pinned for the full TTL.
-_PRESCREEN_MIN_COMPLETENESS = 0.8
-
-_PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
-                                             ttl_seconds=_PRESCREEN_TTL_SECONDS)
-
-def _parse_alloc_timeout_seconds() -> float:
-    """Allocation-slot timeout from the environment, read once at import time.
-
-    Env var ``OPTIONS_ALLOC_TIMEOUT_SECONDS`` overrides the default of 3600
-    seconds. Unparsable, empty, zero, or negative values fall back to the
-    default so the slot can never silently wait forever.
-    """
-    raw = os.environ.get("OPTIONS_ALLOC_TIMEOUT_SECONDS", "3600").strip()
-    try:
-        val = float(raw)
-    except ValueError:
-        return 3600.0
-    if val <= 0:
-        return 3600.0
-    return val
-
-
-# Serializes the POST-WAIT phase (mark-to-market -> chain fetch ->
-# allocator -> open/close -> complete_spy_scan) across concurrent
-# options builds. A build parked in _wait_for_market_open no longer
-# holds the scan-queue slot (see scan_queue._is_any_scan_running), so
-# all three daily accounts can be computing at once; this lock is what
-# keeps them from allocating against each other's cash and position
-# reads. Acquired only AFTER the wait returns, so accounts allocate one
-# at a time in the order they finish waiting.
-#
-# Deadlock-free by construction: it is acquired at exactly ONE call site,
-# nothing inside the guarded region re-acquires it, and no code inside the
-# _allocation_slot block ever acquires scan_queue._SCAN_LOCK. A thread
-# holding _ALLOC_LOCK can never block on _SCAN_LOCK, even when _SCAN_LOCK is held across the worker start.
-_ALLOC_LOCK = threading.Lock()
-_ALLOC_POLL_SECONDS = 30.0
-# Global allocation-slot hard timeout. Overridable at module load via the
-# OPTIONS_ALLOC_TIMEOUT_SECONDS environment variable; unparsable, zero, or
-# negative values fall back to 3600 seconds. Tests may monkeypatch this
-# module-level attribute directly.
-_ALLOC_TIMEOUT_SECONDS = _parse_alloc_timeout_seconds()
-
-
-def _slot_release_enabled() -> bool:
-    """Kill switch for the proactive queue hand-off AND the busy predicate (env, read at call time).
-
-    Three concurrent full pipelines in one 4g-capped container is exactly
-    the shape that reproduced the host OOM the scan queue was built to
-    prevent (see the _SCAN_LOCK comment in portfolio_routes.start_scan),
-    so a no-code-change rollback has to exist. Flipping this to 0 does two
-    things together: it stops the PROACTIVE dequeue below, AND (via
-    scan_queue._wait_market_release_enabled reading this same env var) it
-    puts 'running_wait_market' back into scan_queue._is_any_scan_running's
-    busy set, so a newly REQUESTED scan queues behind a parked waiter again
-    instead of starting beside it. Both halves have to move together —
-    stopping only the proactive hand-off while the busy check still ignored
-    waiters would leave the container reading as idle for the whole ~2h
-    daily wait window, which defeats the rollback this switch exists for.
-    """
-    return os.environ.get("OPTIONS_RELEASE_SLOT_DURING_WAIT", "1").strip().lower() not in {
-        "0", "false", "no", "off"
-    }
-
-
-def _release_scan_slot(scan_id: int) -> None:
-    """Best-effort hand-off of the scan-queue slot when a build starts waiting.
-
-    A queue error must never sink a live build.
-    """
-    if not _slot_release_enabled():
-        return
-    try:
-        scan_queue._dequeue_next_scan()
-    except Exception:
-        log.exception("[options %s] queue advance on wait entry failed", scan_id)
-
-
-@contextmanager
-def _phase(label: str) -> Iterator[None]:
-    """Tag failures with a phase prefix; cancellations pass through untouched."""
-    try:
-        yield
-    except spy_scanner.ScanCancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001 — re-raised with friendlier context
-        raise RuntimeError(f"{label}: {exc}") from exc
-
-
-@contextmanager
-def _allocation_slot(scan_id: int) -> Iterator[None]:
-    """Hold the global allocation lock for one build's post-wait phase.
-
-    Blocks in _ALLOC_POLL_SECONDS slices rather than one open-ended
-    acquire so a queued waiter (a) keeps writing updated_at and cannot
-    be mistaken for a crashed worker by the stuck-run reaper
-    (web/scheduler.py STUCK_SCAN_STALL_MIN, default 120 min) and (b)
-    still honours a cancel request while blocked. Fails loudly past
-    _ALLOC_TIMEOUT_SECONDS instead of hanging a thread forever.
-
-    The timeout value defaults to 3600 seconds and may be overridden at
-    module load by the ``OPTIONS_ALLOC_TIMEOUT_SECONDS`` environment
-    variable. Unparsable, empty, zero, or negative values fall back to the
-    default so the slot can never silently wait forever.
-
-    If the timeout fires before this waiter ever acquires the lock, the
-    raised RuntimeError makes clear the scan never entered the allocation
-    phase (it remained queued behind another build).
-    """
-    waited = 0.0
-    while not _ALLOC_LOCK.acquire(timeout=_ALLOC_POLL_SECONDS):
-        waited += _ALLOC_POLL_SECONDS
-        if db.is_spy_scan_cancelled(scan_id):
-            raise spy_scanner.ScanCancelled()
-        if waited >= _ALLOC_TIMEOUT_SECONDS:
-            raise RuntimeError(
-                f"scan never acquired the allocation lock (queued behind another build); "
-                f"timed out after {waited:.0f}s waiting for the allocation slot")
-        # Heartbeat: this waiter now uses its own running_wait_alloc status,
-        # distinct from _wait_for_market_open's running_wait_market, precisely so
-        # downstream consumers (the dashboard, /api/portfolio/status) can tell
-        # a pre-open parker apart from a build queued behind another account's
-        # allocation.
-        db.update_spy_scan(scan_id, status="running_wait_alloc")
-        log.info("[options %s] waiting for the allocation slot (%.0fs)", scan_id, waited)
-    try:
-        # A cancel requested while queued must not still allocate.
-        if db.is_spy_scan_cancelled(scan_id):
-            raise spy_scanner.ScanCancelled()
-        yield
-    finally:
-        _ALLOC_LOCK.release()
-
-
-# ── Pre-screen ───────────────────────────────────────────────────────────────
-
-def _mover_score(closes: list[float], volumes: list[float]) -> float | None:
-    """Direction-agnostic 'is something happening here' score: |5d| + half |20d|
-    momentum plus a volume-surge kicker. Big losers rank too — they're put
-    candidates."""
-    if len(closes) < 5:
-        return None
-    ret5 = abs((closes[-1] / closes[-5]) - 1) * 100
-    ret20 = abs((closes[-1] / closes[0]) - 1) * 100 if len(closes) >= 20 else 0.0
-    vol_kick = 0.0
-    if len(volumes) >= 20 and volumes[-1]:
-        avg = sum(volumes[-20:-1]) / 19
-        if avg:
-            vol_kick = max(0.0, float(volumes[-1]) / avg - 1.0)
-    return ret5 + 0.5 * ret20 + 3.0 * min(vol_kick, 3.0)
-
-
-def prescreen(
-    tickers: list[str],
-    top_n: int = PRESCREEN_TOP,
-    *,
-    trade_date: str | None = None,
-) -> list[str]:
-    """Rank the universe by mover score from one bulk download; top_n survive.
-
-    Cached same-trading-day so the three daily options accounts don't each
-    pay for an identical ~500-ticker yfinance download.  trade_date=None
-    bypasses the cache for callers that need a fresh screen. Downloads covering
-    fewer than 80% of the requested universe are never cached, so a partial or
-    rate-limited download doesn't pin a degraded movers list for the full TTL.
-    """
-    if trade_date is not None:
-        key = (
-            top_n,
-            hashlib.sha256("\n".join(sorted(tickers)).encode()).hexdigest()[:16],
-        )
-        cached = _PRESCREEN_CACHE.get(trade_date, key)
-        if cached is not None:
-            log.info("[options] reusing same-day movers pre-screen (%d tickers)", len(cached))
-            return list(cached)
-
-    try:
-        raw = yf.download(tickers, period="1mo", auto_adjust=True, progress=False, threads=True)
-    except Exception as exc:
-        raise RuntimeError(f"pre-screen bulk download failed: {exc}") from exc
-    scored: list[tuple[float, str]] = []
-    if raw is not None and not raw.empty:
-        if hasattr(raw.columns, "levels"):
-            for t in tickers:
-                try:
-                    closes = raw["Close"][t].dropna().tolist()
-                    volumes = raw["Volume"][t].dropna().tolist()
-                except (KeyError, TypeError):
-                    continue
-                s = _mover_score(closes, volumes)
-                if s is not None:
-                    scored.append((s, t))
-        elif tickers:
-            closes = raw["Close"].dropna().tolist()
-            volumes = raw["Volume"].dropna().tolist()
-            s = _mover_score(closes, volumes)
-            if s is not None:
-                scored.append((s, tickers[0]))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    result = [t for _, t in scored[:top_n]]
-    if result and trade_date is not None and len(scored) >= _PRESCREEN_MIN_COMPLETENESS * len(tickers):
-        _PRESCREEN_CACHE.put(trade_date, key, list(result))
-    return result
-
-
-def select_deep_dive_targets(quick_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The rows that get a full multi-agent deep dive.
-
-    Top DEEP_TOP directional names (BUY *and* SELL, by conviction) PLUS every
-    ALWAYS_DEEP ticker (SPY) guaranteed a dive even when its quick scan came back
-    HOLD or it fell outside the top DEEP_TOP — the full agent graph gets its own
-    shot at a directional call on the index gauge. ALWAYS_DEEP names are appended
-    once (never duplicated when they already made the directional cut)."""
-    directional = [r for r in quick_results
-                   if (r.get("signal") or "").upper() in ("BUY", "SELL")]
-    top = sorted(directional, key=lambda r: -(r.get("conviction") or 0))[:DEEP_TOP]
-    have = {(r.get("ticker") or "").upper() for r in top}
-    for sym in ALWAYS_DEEP:
-        if sym not in have:
-            row = next((r for r in quick_results
-                        if (r.get("ticker") or "").upper() == sym), None)
-            if row:
-                top.append(row)
-    return top
 
 
 # ── Expiry settlement ────────────────────────────────────────────────────────
@@ -731,47 +496,6 @@ def account_summary(paper_account_id: int) -> dict[str, Any]:
 
 # ── The daily build ──────────────────────────────────────────────────────────
 
-def _wait_for_market_open(scan_id: int) -> None:
-    """Block until MARKET_OPEN_ET on trading days so entries fill at live mids.
-    Weekend manual runs proceed immediately (weekday check only). Heartbeats
-    updated_at every few minutes so the stuck-run reaper doesn't mistake the
-    wait for a crashed worker.
-
-    Status is "running_wait_market", distinct from "running_alloc" (real
-    vetting/allocation work). This wait runs 07:30-09:35 ET daily doing
-    nothing but sleeping — with a single "running_alloc" label the frontend
-    couldn't tell "blocked" from "working" and polled the full scan payload
-    every 5s for up to 2 hours a day for zero new information. See
-    run_options_build for where the label flips back once real work starts.
-
-    The first time the loop actually blocks it hands the container-wide scan
-    queue slot to the next queued options account. Because all three daily
-    accounts' rows are usually created in one request loop, accounts 2 and 3
-    land 'queued' behind account 1's 'pending'; account 1 parking dequeues
-    account 2, and account 2 parking dequeues account 3. Allocation is still
-    re-serialized by _allocation_slot(), so parallel compute cannot double-
-    allocate.
-    """
-    ticks = 0
-    while True:
-        now = options_data.now_et()
-        if now.weekday() >= 5 or (now.hour, now.minute) >= MARKET_OPEN_ET:
-            return
-        if db.is_spy_scan_cancelled(scan_id):
-            raise spy_scanner.ScanCancelled()
-        if ticks == 0:
-            # This wait is a sleep, not work — hand the container-wide scan slot
-            # to the next queued options account so it can run its own compute
-            # phase now instead of after this whole build. Allocation is
-            # re-serialized by _allocation_slot(), so parallel compute cannot
-            # double-allocate.
-            _release_scan_slot(scan_id)
-        if ticks % 6 == 0:  # every ~3 minutes
-            db.update_spy_scan(scan_id, status="running_wait_market")
-        ticks += 1
-        time_mod.sleep(30)
-
-
 def _zero_candidate_reason(
     quick_results: list[dict[str, Any]],
     directional: list[dict[str, Any]],
@@ -891,13 +615,13 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
 
     # Phase 3: wait for live quotes, then vet contracts and allocate.
     #
-    # Set to running_wait_market first — _wait_for_market_open owns the label
+    # Set to running_wait_market first — wait_for_market_open owns the label
     # while it's actually blocked, and only flips back to running_alloc the
     # moment real work resumes below. A run outside the wait window (weekend,
     # already past open) returns immediately and this line is a no-op status
     # bounce, not an extra poll cycle.
     db.update_spy_scan(scan_id, status="running_wait_market")
-    _wait_for_market_open(scan_id)
+    wait_for_market_open(scan_id)
     with _allocation_slot(scan_id):
         db.update_spy_scan(scan_id, status="running_alloc")
         with _phase("Position mark-to-market failed"):

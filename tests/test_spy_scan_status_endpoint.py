@@ -12,12 +12,13 @@ Covers:
   - upsert_spy_quick_result: reasoning/error get truncated at write time
   - _is_any_scan_running: running_wait_market does NOT count as busy (a scan
     sitting in the daily market-open wait is doing no work; serialization of
-    the real allocation phase is handled by options_engine._ALLOC_LOCK)
+    the real allocation phase is handled by research_engine._ALLOC_LOCK, while
+    the proactive queue hand-off from the old options wait was removed)
 
-See test_options_market_wait.py for the options_engine running_wait_market /
-running_alloc status-split tests around _wait_for_market_open — those moved
-out because options_engine.py is a tier-4-only module (this file survives
-down to tier 3, where options_engine doesn't exist).
+See tests/test_research_engine.py for the running_wait_market /
+running_alloc status-split tests around research_engine.wait_for_market_open
+— those moved out because the market wait is now tier-3 shared code (this
+file survives down to tier 3).
 
 No network access. Run with: uv run pytest tests/test_spy_scan_status_endpoint.py -v
 """
@@ -133,8 +134,9 @@ class TestIsAnyScanRunningIgnoresWaitMarket:
     """A scan parked in running_wait_market (up to ~2h/day, doing nothing but
     sleeping while waiting for 09:35 ET) must NOT count as 'busy' — it is
     consuming no compute, LLM budget, or CPU. Serialization of the real
-    allocation phase is handled by options_engine._ALLOC_LOCK, not by this
-    busy check."""
+    allocation phase is handled by research_engine._ALLOC_LOCK, not by this
+    busy check; the proactive queue hand-off from the old options wait was
+    removed."""
 
     def test_wait_market_status_does_not_count_as_running(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")

@@ -1,6 +1,6 @@
 """In-process, same-trading-day cache primitive.
 
-Three web-layer caches (in `web/spy_scanner.py`, `web/options_engine.py`,
+Three web-layer caches (in `web/spy_scanner.py`, `web/research_engine.py`,
 and `web/options_data.py`) need identical semantics: cache by
 `(trade_date, key)`, expire entries by TTL, and evict a prior trading day's
 data on the first write for a new date.  This module centralises that
@@ -41,7 +41,7 @@ class SameDayCache:
     successful `put` wins.  Holding the lock across a long-running fetch
     (for example a 30-second yfinance download) would serialise those
     fetches and create lock-ordering hazards against
-    `options_engine._ALLOC_LOCK`.
+    `research_engine._ALLOC_LOCK`.
 
     Values are stored by reference.  Callers that mutate a cached value
     must copy it on `get` and/or `put` themselves.
