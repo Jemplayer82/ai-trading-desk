@@ -1538,7 +1538,7 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         # so a "completed" row with an empty portfolio means allocation ran and
         # finished but produced zero positions -- a real failure mode. Any
         # other status means allocation has not finished yet, which is benign
-        # and expected for a brand-new account before its first weekly
+        # and expected for a brand-new account before its first daily
         # allocation.
         if scan.get("status") == "completed":
             return {"error": "allocation produced no positions"}
@@ -1637,7 +1637,7 @@ def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
 
     The outage condition is still exactly ``errors >= 1 and successes == 0``.
 
-    A brand-new paper account has no portfolio until its first weekly
+    A brand-new paper account has no portfolio until its first daily
     allocation runs, so an all-skipped result is an ordinary steady state --
     it must not 500 the hourly cron endpoint and must not page anyone. But a
     mix of one real error and one empty-portfolio skip, with zero successes,

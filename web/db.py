@@ -256,7 +256,7 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
 );
 
 -- One row per paper option contract position over its whole life. Unlike the
--- equity paper portfolio (a weekly JSON snapshot in spy_scans.portfolio_json),
+-- equity paper portfolio (a daily JSON snapshot in spy_scans.portfolio_json),
 -- option positions open/close/expire on different days, so cash and realized
 -- P&L must be authoritative — normalized rows + the append-only cash ledger
 -- below, mutated only through the transactional helpers in this module.

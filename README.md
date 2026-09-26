@@ -662,7 +662,7 @@ ai-trading-desk/
 │   ├── research_engine.py  # shared daily S&P 500 research
 # TIER:3 END
 # TIER:4 BEGIN
-│   ├── options_engine.py   # daily options build pipeline
+│   ├── options_engine.py   # per-account options allocation
 │   ├── options_learning.py # closed-trade grading + lessons
 # TIER:4 END
 │   ├── bus.py              # Switchboard MCP client + resilient publisher

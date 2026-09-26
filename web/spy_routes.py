@@ -275,7 +275,7 @@ def refresh_spy_prices_latest() -> dict[str, Any]:
 
     500s only on a genuine total outage. Accounts that merely had nothing to
     re-price -- ``{"skipped": "no portfolio yet"}``, the normal state until an
-    account's first weekly allocation runs -- come back 200 with their
+    account's first daily allocation runs -- come back 200 with their
     per-account entry intact in the body, and never trip the outage alert.
     """
     result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
