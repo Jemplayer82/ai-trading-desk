@@ -340,7 +340,12 @@
     <section class="main">
       <div class="panel">
         <div class="panel-title">[ S&amp;P 500 Scanner ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Scans all ~500 S&amp;P 500 tickers, deep-dives the top 50 by conviction, and builds a paper portfolio. Runs automatically every Saturday midnight ET.</p>
+        <p class="dim" style="margin: 0 0 10px;">Trades every weekday from the shared 00:00 ET research (top 150 movers + SPY quick-scanned, top 50 + SPY deep-dived). Each account allocates at its own time; fills use live quotes after 09:35 ET.</p>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
+          <span id="spy-research-status" class="dim"></span>
+          <span style="flex:1;"></span>
+          <label>Research time (ET) <input type="time" id="spy-research-time" onchange="saveResearchTime()"></label> <span id="spy-research-time-status" class="dim" style="font-size:11px;"></span>
+        </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
           <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
           <select id="spy-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>
@@ -349,7 +354,7 @@
           <span id="spy-account-meta" class="dim" style="font-size:11px;"></span>
         </div>
         <div class="actions" style="justify-content: flex-start; gap: 10px;">
-          <button id="btn-spy-scan" type="button" class="primary">Run S&amp;P 500 Scan</button>
+          <button id="btn-spy-scan" type="button" class="primary">Allocate now</button>
           <button id="btn-spy-stop" type="button" class="ghost" hidden>Stop Scan</button>
           <button id="btn-spy-account" type="button" class="ghost">Refresh</button>
           <span id="spy-scan-status" class="dim" style="margin-left: 4px;"></span>
@@ -382,12 +387,12 @@
                 <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
               </div>
             </label>
-            <label>Scan time (ET)<input type="time" id="new-acct-schedule" style="margin-top:4px;"></label>
+            <label>Allocation time (ET)<input type="time" id="new-acct-schedule" style="margin-top:4px;"></label>
             <label>Stop policy<select id="new-acct-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
             <label id="new-acct-stop-value-wrap" hidden><span id="new-acct-stop-value-label">Stop below entry (%)</span><input type="number" id="new-acct-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
             <label id="new-acct-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="new-acct-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
           </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs. A blank scan time means the account only runs when you click Run, and the stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order.</p>
+          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs. A blank allocation time means the account only trades when you click Allocate now. Trades fill after the 09:35 ET open from that morning's shared research. The stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order.</p>
           <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
             <button type="button" id="btn-create-account" class="primary">Create Account</button>
           </div>

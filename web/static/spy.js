@@ -8,13 +8,16 @@
 // Endpoints — all start with /api/spy, so web/nginx.conf's `location /api/spy`
 // string-prefix match routes them to the PORTFOLIO app (web/portfolio_main.py);
 // the prefix also catches /api/spy-scans and /api/spy-account, not just /api/spy:
-//   POST   /api/spy-scan                          start a scan (idempotent per day)
+//   POST   /api/spy-scan                          start today's allocation for {account_id} (idempotent per day)
 //   GET    /api/spy-scans[?limit=N]               history list (DESC by id)
 //   GET    /api/spy-scans/{id}                    scan detail (fetched on load + on real change)
 //   GET    /api/spy-scans/{id}/status             cheap poll target (see below)
 //   DELETE /api/spy-scans/{id}                    delete scan + results
 //   POST   /api/spy-scans/{id}/cancel             request cancel (deep dives finish)
 //   POST   /api/spy-scans/{id}/refresh-prices     re-price the paper portfolio
+//   GET    /api/research-scans/today              today's shared research row {trade_date, scan, attempts}
+//   POST   /api/research-scan                     start today's shared research (idempotent)
+//   GET/PUT /api/settings[/SCHEDULE_RESEARCH_TIME] shared research time (ET)
 //
 // Globals consumed from utils.js (loaded first): $, escapeHtml, fmtTs,
 // renderMarkdown, apiFetch, progressBar. Everything here is top-level in the
@@ -150,7 +153,7 @@ function populateAccountForm(acct) {
 // Clear the form back to "create" defaults.
 function resetAccountForm() {
   editingAccountId = null;
-  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "00:00", stop_type: "none", stop_value: null, stop_limit_offset: null });
+  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "09:00", stop_type: "none", stop_value: null, stop_limit_offset: null });
   const btn = $("btn-create-account");
   if (btn) btn.textContent = "Create Account";
 }
@@ -279,9 +282,10 @@ async function loadSpyQueue() {
   if (!ul) return;
   try {
     const data = await apiFetch("/api/portfolio/status");
-    // only:["spy"] excludes options runs (also spy_scans rows, kind='options')
-    // that would otherwise leak into the S&P queue.
-    renderScanQueue(ul, data, { only: ["spy"], onOpen: (item) => loadSpyScan(item.id) });
+    // only:["spy","research"] excludes options runs (also spy_scans rows,
+    // kind='options') that would otherwise leak into the S&P queue, while
+    // keeping the shared daily research row the S&P allocations wait on.
+    renderScanQueue(ul, data, { only: ["spy", "research"], onOpen: (item) => loadSpyScan(item.id) });
   } catch (e) {
     ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(String(e)) + "</li>";
   }
@@ -289,6 +293,7 @@ async function loadSpyQueue() {
 
 async function loadSpyHistory() {
   loadSpyQueue();  // keep queue in sync whenever history refreshes
+  loadResearchStatus();  // and the shared daily research line
   const ul = $("spy-history");
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
@@ -534,10 +539,20 @@ function renderSpyScan(scan) {
   // Progress section (only while running)
   let progressHtml = "";
   if (scan.status && scan.status.startsWith("running")) {
-    const qt = scan.quick_total || 500;
+    const qt = scan.quick_total || 151;
     const qc = scan.quick_count || 0;
-    const dt = scan.deep_total || 50;
+    const dt = scan.deep_total || 51;
     const dc = scan.deep_count || 0;
+    // Allocation gates (research -> market open -> allocation slot -> allocate).
+    const gateText = {
+      running_wait_research: "Waiting for today's shared research…",
+      running_wait_market: "Waiting for market open (09:35 ET) so entries fill at live quotes.",
+      running_wait_alloc: "Waiting for another account to finish allocating…",
+      running_alloc: "Allocating…",
+    }[scan.status];
+    const gateNote = gateText
+      ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">" + gateText + "</p>"
+      : "";
     // Two bars (quick + deep) in one panel; progressBar() (utils.js) is the shared
     // bar primitive also used by the portfolio scan.
     progressHtml = (
@@ -551,6 +566,7 @@ function renderSpyScan(scan) {
           "<div style=\"margin-bottom:4px;\">Deep dive: " + dc + "/" + dt + "</div>" +
           progressBar(dc, dt) +
         "</div>" +
+        gateNote +
       "</div>"
     );
   }
@@ -761,30 +777,149 @@ function renderSpyScan(scan) {
   });
 }
 
-// ===== Start scan / refresh prices =====
+// ===== Allocate now / refresh prices =====
 
+// Start today's allocation for the selected account. Each account allocates
+// from the shared daily research; the row waits for that research and for the
+// 09:35 ET open before it fills at live quotes.
 async function triggerSpyScan() {
   const btn = $("btn-spy-scan");
   const status = $("spy-scan-status");
-  if (btn) btn.disabled = true;
-  if (status) status.textContent = "Starting scan…";
+  if (!activePaperAccountId) {
+    if (status) status.textContent = "Select or create an S&P paper account first (⚙ Accounts) — each account allocates from the shared daily research.";
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = "Allocate now"; }
+  if (status) status.textContent = "Starting allocation…";
   try {
-    const body = activePaperAccountId ? { account_id: activePaperAccountId } : {};
     const r = await fetch("/api/spy-scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ account_id: activePaperAccountId }),
     });
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // 409 = not a trading day; 400/404 = bad or missing account.
+      if (status) status.textContent = (data && data.detail) ? String(data.detail) : "Error: HTTP " + r.status;
+      return;
+    }
     if (data.error) throw new Error(data.error);
-    const msg = data.new ? "Scan #" + data.scan_id + " started" : "Scan #" + data.scan_id + " already running";
+    const msg = data.new
+      ? "Allocation #" + data.scan_id + " queued — waits for today's research and the 09:35 ET open"
+      : "Allocation #" + data.scan_id + " already running";
     if (status) status.textContent = msg;
     await loadSpyHistory();
     loadSpyScan(data.scan_id);
   } catch (e) {
     if (status) status.textContent = "Error: " + e;
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) { btn.disabled = false; btn.textContent = "Allocate now"; }
+  }
+}
+
+// ===== Shared daily research status =====
+
+// Render today's shared research row into #spy-research-status and, when the
+// Options tab is present, #opt-research-status. Never throws.
+async function loadResearchStatus() {
+  const targets = ["spy-research-status", "opt-research-status"]
+    .map((id) => document.getElementById(id))
+    .filter((el) => el);
+  if (!targets.length) return;
+  let html;
+  try {
+    const data = await apiFetch("/api/research-scans/today");
+    const scan = data && data.scan;
+    let text;
+    if (!scan) {
+      text = "No research yet today";
+    } else {
+      const qc = scan.quick_count || 0;
+      const qt = scan.quick_total || 151;
+      const dc = scan.deep_count || 0;
+      const dt = scan.deep_total || 51;
+      const reused = scan.deep_reused_count || 0;
+      text = "Today's research #" + scan.id + " · " + (scan.status || "—") +
+        " · quick " + qc + "/" + qt + " · deep " + dc + "/" + dt + " (" + reused + " reused)";
+      if (scan.status === "failed" && scan.error) {
+        text += " — " + String(scan.error).slice(0, 160);
+      }
+    }
+    html = escapeHtml(text);
+  } catch (e) {
+    html = "<span style=\"color:var(--accent-red);\">Research status unavailable: " + escapeHtml(String(e)) + "</span>";
+  }
+  html += " <button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:2px 8px;\" onclick=\"runResearchNow()\">Run research</button>";
+  targets.forEach((el) => { el.innerHTML = html; });
+}
+
+// Kick today's shared research (idempotent server-side), report the outcome in
+// the research status line(s), then re-render the status.
+async function runResearchNow() {
+  let msg;
+  try {
+    const r = await fetch("/api/research-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      msg = (data && data.detail) ? String(data.detail) : "Error: HTTP " + r.status;
+    } else if (data && data.detail) {
+      msg = String(data.detail);
+    } else {
+      msg = "Research #" + (data && data.scan_id) + (data && data.new ? " started" : " already " + ((data && data.status) || "running"));
+    }
+  } catch (e) {
+    msg = "Error: " + e;
+  }
+  ["spy-research-status", "opt-research-status"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = msg;
+  });
+  await loadResearchStatus();
+  return msg;
+}
+
+// ===== Shared research time (ET) =====
+
+const RESEARCH_TIME_KEY = "SCHEDULE_RESEARCH_TIME";
+const RESEARCH_TIME_DEFAULT = "00:00";
+
+// Read the shared research time from the settings API and reflect it in the
+// box. Non-secret settings come back verbatim in `masked`.
+async function loadResearchTime() {
+  try {
+    const data = await apiFetch("/api/settings");
+    const registry = Array.isArray(data) ? data : ((data && data.registry) || []);
+    const entry = registry.find((s) => s.key === RESEARCH_TIME_KEY);
+    const value = (entry && entry.has_value && entry.masked) || RESEARCH_TIME_DEFAULT;
+    const timeEl = $("spy-research-time");
+    if (timeEl) timeEl.value = value;
+  } catch (e) {
+    console.error("loadResearchTime failed:", e);
+  }
+}
+
+// Persist a new research time. The scheduler's reconciler picks it up within
+// ~60s — no container restart.
+async function saveResearchTime() {
+  const timeEl = $("spy-research-time");
+  const value = timeEl ? timeEl.value : "";
+  const status = $("spy-research-time-status");
+  if (!value || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    if (status) status.textContent = "enter HH:MM";
+    return;
+  }
+  try {
+    await apiFetch("/api/settings/" + RESEARCH_TIME_KEY, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) });
+    if (status) status.textContent = "saved — takes effect within a minute";
+  } catch (e) {
+    if (status) {
+      status.textContent = "save failed: " + e;
+      status.style.color = "var(--accent-red)";
+    }
   }
 }
 
@@ -804,6 +939,7 @@ async function refreshSpyPrices(scanId) {
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "spy") {
     loadPaperAccounts().then(() => loadSpyHistory());
+    loadResearchTime();
   } else {
     stopSpyPoll();
   }
@@ -894,8 +1030,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Load accounts on boot and wire up sidebar tabs
+  // Load accounts + shared research time on boot and wire up sidebar tabs
   loadPaperAccounts();
+  loadResearchTime();
   _setupSpyStabs();
 });
 
@@ -905,5 +1042,6 @@ setInterval(() => {
   if (pane && !pane.hidden) {
     loadSpyQueue();
     loadSpyHistory();
+    loadResearchStatus();
   }
 }, 15000);

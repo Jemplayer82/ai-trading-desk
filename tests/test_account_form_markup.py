@@ -57,6 +57,14 @@ def test_spy_account_form_within_tier3():
         _assert_id_in_tier_block(html, id_, 3)
 
 
+def test_spy_research_controls_within_tier3():
+    html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
+    if not (ROOT / "web/static/spy.js").exists():
+        pytest.skip("spy.js not present at this tier")
+    for id_ in ("spy-research-status", "spy-research-time", "spy-research-time-status"):
+        _assert_id_in_tier_block(html, id_, 3)
+
+
 def test_options_account_form_within_tier4():
     html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
     if not (ROOT / "web/static/options.js").exists():

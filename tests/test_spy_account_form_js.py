@@ -234,7 +234,7 @@ def test_reset_form_defaults():
     assert result["type"] == "none"
     assert result["value"] == ""
     assert result["offset"] == ""
-    assert result["schedule"] == "00:00"
+    assert result["schedule"] == "09:00"
 
 
 def test_blank_stop_value_blocks_submission():
