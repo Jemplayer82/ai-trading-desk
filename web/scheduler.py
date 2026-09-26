@@ -18,7 +18,9 @@ Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
     per-account          options scan        POST /api/options-scan (one job per options account)
     Mon-Fri 10:00-16:00  options mark        POST /api/options-positions/refresh (+16:45 close pass)
     Mon-Fri 20:00        options settlement  POST /api/options-positions/settle
-    every 60s            schedule_reconciler  syncs per-account scan jobs + nightly scan time
+    settings-driven      daily research      POST /api/research-scan (default 00:00 Mon-Fri, trading days only)
+    every 15 min         research retry      re-POSTs research if missing/failed, before 05:30 ET
+    every 60s            schedule_reconciler  syncs per-account scan jobs + nightly scan/research times
 
 Each job also has a --run-*-now CLI flag for one-shot manual runs (handy for
 testing inside the container without waiting for cron).
@@ -38,7 +40,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import account_policy, alerts, db, features
+from . import account_policy, alerts, db, features, market_calendar
 from . import credentials as creds
 from ._logging import configure_logging
 
@@ -73,6 +75,19 @@ _schwab_last_alert_at: datetime | None = None
 
 NIGHTLY_SCAN_TIME_SETTING = "SCHEDULE_NIGHTLY_SCAN_TIME"
 DEFAULT_NIGHTLY_SCAN_TIME = (22, 0)
+RESEARCH_TIME_SETTING = "SCHEDULE_RESEARCH_TIME"
+DEFAULT_RESEARCH_TIME = (0, 0)
+
+# Shared daily research retry policy (design doc §8). The retry job re-POSTs
+# /api/research-scan when today's research is missing past its grace window or
+# failed, at most RESEARCH_MAX_ATTEMPTS research rows per trade date, and never
+# at/after RESEARCH_RETRY_CUTOFF_ET (a run started later cannot finish before
+# the 10:30 ET allocation deadline).
+RESEARCH_MAX_ATTEMPTS = int(os.environ.get("RESEARCH_MAX_ATTEMPTS", "2"))
+RESEARCH_RETRY_CUTOFF_ET: tuple[int, int] = (
+    account_policy.parse_hhmm(os.environ.get("RESEARCH_RETRY_CUTOFF_ET", "05:30")) or (5, 30)
+)
+RESEARCH_MISSING_GRACE_MIN = 15
 RECONCILE_JOB_ID = "schedule_reconciler"
 _ACCOUNT_JOB_PREFIXES = ("spy_scan_acct_", "options_scan_acct_")
 
@@ -83,32 +98,44 @@ def _internal_headers() -> dict[str, str]:
     return {"X-Internal-Token": tok} if tok else {}
 
 
-def nightly_scan_time() -> tuple[int, int]:
-    """Fire time for job_nightly_scan: DB setting, then env, then 22:00.
+def _setting_time(setting: str, default: tuple[int, int]) -> tuple[int, int]:
+    """Resolve an HH:MM schedule setting: DB app setting, then env, then default.
 
     Read at CALL time (not import time) so the reconciler picks up a change the
-    user saved in the dashboard without a container restart. Never raises.
+    user saved in the dashboard without a container restart. A malformed stored
+    value logs a warning and yields the default. Never raises.
     """
     stored_value = None
     try:
-        stored_value = db.get_app_setting(NIGHTLY_SCAN_TIME_SETTING)
+        stored_value = db.get_app_setting(setting)
     except Exception:
-        log.exception("[schedule] DB nightly scan time read failed; falling back to env/default")
+        log.exception("[schedule] DB read of %s failed; falling back to env/default", setting)
     if stored_value is not None and stored_value.strip():
         parsed = account_policy.parse_hhmm(stored_value)
         if parsed is not None:
             return parsed
         log.warning(
-            "[schedule] stored nightly scan time %r is malformed; using default %s:%02d",
+            "[schedule] stored %s %r is malformed; using default %s:%02d",
+            setting,
             stored_value,
-            *DEFAULT_NIGHTLY_SCAN_TIME,
+            *default,
         )
-        return DEFAULT_NIGHTLY_SCAN_TIME
-    env_value = os.environ.get(NIGHTLY_SCAN_TIME_SETTING)
+        return default
+    env_value = os.environ.get(setting)
     parsed = account_policy.parse_hhmm(env_value)
     if parsed is not None:
         return parsed
-    return DEFAULT_NIGHTLY_SCAN_TIME
+    return default
+
+
+def nightly_scan_time() -> tuple[int, int]:
+    """Fire time for job_nightly_scan: DB setting, then env, then 22:00."""
+    return _setting_time(NIGHTLY_SCAN_TIME_SETTING, DEFAULT_NIGHTLY_SCAN_TIME)
+
+
+def research_time() -> tuple[int, int]:
+    """Fire time for job_research_scan: DB setting, then env, then 00:00."""
+    return _setting_time(RESEARCH_TIME_SETTING, DEFAULT_RESEARCH_TIME)
 
 
 def _apply_db_config() -> None:
@@ -260,6 +287,79 @@ def job_token_health() -> None:
     _schwab_down_since = None
     _schwab_last_alert_at = None
     log.info("[token_health] Schwab MCP connected")
+
+
+def _post_research(reason: str) -> None:
+    """POST the portfolio container's shared daily research endpoint.
+
+    The endpoint starts research in a background worker and returns at once, so
+    the 60s timeout covers request startup only. It is idempotent per trade
+    date for pending/running/completed rows. Never raises; failures alert.
+    """
+    log.info("[research_scan] firing daily research (%s) at %s", reason, PORTFOLIO_URL)
+    try:
+        r = httpx.post(
+            f"{PORTFOLIO_URL}/api/research-scan",
+            json={},
+            timeout=60,
+            headers=_internal_headers(),
+        )
+        log.info("[research_scan] (%s) response %s: %s", reason, r.status_code, r.text[:400])
+        if r.status_code >= 400:
+            alerts.notify(
+                f"⚠️ Daily research rejected ({r.status_code}).",
+                r.text[:_ALERT_DETAIL_MAX],
+                link=DASHBOARD_URL,
+            )
+    except Exception as exc:
+        log.exception("[research_scan] (%s) failed: %s", reason, exc)
+        alerts.notify(
+            "⚠️ Daily research failed to start.",
+            str(exc),
+            link=DASHBOARD_URL,
+        )
+
+
+def job_research_scan() -> None:
+    """Start today's shared research (settings-driven time, default 00:00 ET)."""
+    if not market_calendar.is_trading_day(market_calendar.today_et()):
+        log.info("[research_scan] skipped: not an NYSE trading day")
+        return
+    _post_research("scheduled")
+
+
+def job_research_retry() -> None:
+    """Every 15 min: re-start today's research if it is missing or failed.
+
+    Never raises.
+    """
+    try:
+        now = market_calendar.now_et()
+        if not market_calendar.is_trading_day(now):
+            return
+        # The cutoff applies to BOTH the missing and the failed branch: a
+        # research run started after it cannot finish before the 10:30 ET
+        # allocation deadline, so starting one would only burn LLM budget.
+        if (now.hour, now.minute) >= RESEARCH_RETRY_CUTOFF_ET:
+            return
+        today = now.date().isoformat()
+        latest = db.latest_research_scan(today)
+        attempts = db.count_research_attempts(today)
+        h, m = research_time()
+        due = now.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(
+            minutes=RESEARCH_MISSING_GRACE_MIN
+        )
+        if latest is None and now >= due:
+            log.info("[research_retry] no research row for %s past %s; starting it", today, due)
+            _post_research("missing")
+        elif latest and latest["status"] == "failed" and attempts < RESEARCH_MAX_ATTEMPTS:
+            # Failed rows don't satisfy the endpoint's idempotency, so this
+            # creates a fresh research row; completed deep dives from the failed
+            # attempt are reused via find_reusable_analysis.
+            log.info("[research_retry] retrying failed research #%s", latest["id"])
+            _post_research("retry")
+    except Exception:
+        log.exception("[research_retry] crashed")
 
 
 def job_spy_scan() -> None:
@@ -458,8 +558,21 @@ _ACCOUNT_JOBS = {
 }
 
 
+# Global Mon-Fri cron jobs whose HH:MM comes from an app setting:
+# (job id, time-resolver function NAME, job function NAME, required feature).
+# Names, not objects, so the reconciler resolves them at call time and tests
+# that monkeypatch the module attributes keep working.
+_SETTING_JOBS = (
+    ("nightly_scan", "nightly_scan_time", "job_nightly_scan", "schwab"),
+    ("research_scan", "research_time", "job_research_scan", "sp500"),
+)
+
+
 def job_reconcile_schedules(sched) -> None:
-    """Sync APScheduler with per-account schedule_time + the nightly-scan setting.
+    """Sync APScheduler with per-account schedule_time + the setting-driven times.
+
+    The setting-driven jobs are listed in _SETTING_JOBS (nightly scan, daily
+    research).
 
     Runs every 60s so a schedule edited in the dashboard takes effect without a
     container restart. Must never raise: a malformed stored time is logged and
@@ -539,36 +652,38 @@ def job_reconcile_schedules(sched) -> None:
         except Exception:
             log.exception("[schedule] failed to enumerate jobs during stale removal")
 
-        if features.enabled("schwab"):
+        for job_id, time_fn_name, func_name, feature in _SETTING_JOBS:
+            if not features.enabled(feature):
+                continue
             try:
-                existing = sched.get_job("nightly_scan")
-                if existing is not None:
-                    hour, minute = nightly_scan_time()
-                    trigger = CronTrigger(
-                        day_of_week="mon-fri", hour=hour, minute=minute, timezone=TIMEZONE
+                existing = sched.get_job(job_id)
+                if existing is None:
+                    continue
+                # Resolved at call time so monkeypatched module attributes win.
+                time_fn = globals()[time_fn_name]
+                func = globals()[func_name]
+                hour, minute = time_fn()
+                trigger = CronTrigger(
+                    day_of_week="mon-fri", hour=hour, minute=minute, timezone=TIMEZONE
+                )
+                if str(trigger) != str(existing.trigger):
+                    # Same pending-jobs caveat as the per-account loop above:
+                    # remove before re-add so the update takes effect even on
+                    # a not-yet-started scheduler.
+                    try:
+                        sched.remove_job(job_id)
+                    except Exception:
+                        log.exception("[schedule] failed to remove stale %s trigger before re-add", job_id)
+                    sched.add_job(func, trigger, id=job_id, replace_existing=True)
+                    log.info(
+                        "[schedule] updated %s to %02d:%02d %s",
+                        job_id,
+                        hour,
+                        minute,
+                        TIMEZONE,
                     )
-                    if str(existing.trigger) != str(trigger):
-                        # Same pending-jobs caveat as the per-account loop above:
-                        # remove before re-add so the update takes effect even on
-                        # a not-yet-started scheduler.
-                        try:
-                            sched.remove_job("nightly_scan")
-                        except Exception:
-                            log.exception("[schedule] failed to remove stale nightly_scan trigger before re-add")
-                        sched.add_job(
-                            job_nightly_scan,
-                            trigger,
-                            id="nightly_scan",
-                            replace_existing=True,
-                        )
-                        log.info(
-                            "[schedule] updated nightly_scan to %02d:%02d %s",
-                            hour,
-                            minute,
-                            TIMEZONE,
-                        )
             except Exception:
-                log.exception("[schedule] failed to reconcile nightly_scan")
+                log.exception("[schedule] failed to reconcile %s", job_id)
     except Exception:
         log.exception("[schedule] reconcile pass crashed")
 
@@ -834,9 +949,11 @@ def register_jobs(sched: BlockingScheduler) -> None:
     """Register cron jobs, gated by feature tier (see web/features.py).
 
     reap_stuck_runs, outcome_sweep, and schedule_reconciler always register.
-    The reconciler syncs per-account scan times and the nightly-scan time,
-    so cron registrations that used to be global (spy_scan, options_scan) are
-    now created per account at runtime.
+    The reconciler syncs per-account scan times and the setting-driven times
+    (nightly scan, daily research), so cron registrations that used to be
+    global (spy_scan, options_scan) are now created per account at runtime.
+    With sp500, research_scan starts the shared daily research and
+    research_retry re-starts it when missing or failed.
     """
     if features.enabled("schwab"):
         _h, _m = nightly_scan_time()
@@ -864,6 +981,24 @@ def register_jobs(sched: BlockingScheduler) -> None:
             replace_existing=True,
         )
     if features.enabled("sp500"):
+        _rh, _rm = research_time()
+        sched.add_job(
+            job_research_scan,
+            # Shared daily research, Mon-Fri (holidays skipped inside the job).
+            # Time comes from the SCHEDULE_RESEARCH_TIME setting (default 00:00
+            # ET) and is kept current by the schedule_reconciler.
+            CronTrigger(day_of_week="mon-fri", hour=_rh, minute=_rm, timezone=TIMEZONE),
+            id="research_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_research_retry,
+            # Re-starts today's research when it is missing past a grace window
+            # or failed, bounded by RESEARCH_MAX_ATTEMPTS and the 05:30 ET cutoff.
+            IntervalTrigger(minutes=15),
+            id="research_retry",
+            replace_existing=True,
+        )
         sched.add_job(
             job_spy_price_refresh,
             CronTrigger(day_of_week="mon-fri", hour="9-16", minute=0, timezone=TIMEZONE),

@@ -39,19 +39,24 @@ class TestRegisterJobs:
         assert ids == {
             "reap_stuck_runs", "outcome_sweep", "schedule_reconciler",
             "nightly_scan", "morning_newsletter", "token_health",
-            "spy_price_refresh",
+            "spy_price_refresh", "research_scan", "research_retry",
         }
 
-    def test_tier4_registers_all_eleven_jobs(self, monkeypatch):
+    def test_tier4_registers_all_thirteen_jobs(self, monkeypatch):
         ids = _registered_ids(monkeypatch, "schwab,sp500,options")
         assert ids == {
             "reap_stuck_runs", "outcome_sweep", "schedule_reconciler",
             "nightly_scan", "morning_newsletter", "token_health",
-            "spy_price_refresh",
+            "spy_price_refresh", "research_scan", "research_retry",
             "options_refresh", "options_refresh_close",
             "options_settle", "options_grade",
         }
-        assert len(ids) == 11
+        assert len(ids) == 13
+
+    def test_schwab_alone_has_no_research_jobs(self, monkeypatch):
+        ids = _registered_ids(monkeypatch, "schwab")
+        assert "research_scan" not in ids
+        assert "research_retry" not in ids
 
     def test_options_alone_without_sp500_does_not_register_sp500_jobs(self, monkeypatch):
         # Not a real tier combination (options implies sp500 in the cumulative
@@ -106,3 +111,44 @@ class TestRegisterJobs:
         trigger_str = str(job.trigger)
         assert "hour='22'" in trigger_str
         assert "minute='0'" in trigger_str
+
+    def test_research_time_uses_settings_value(self, monkeypatch):
+        monkeypatch.setenv("FEATURES", "schwab,sp500")
+        web.db.set_app_setting("SCHEDULE_RESEARCH_TIME", "01:15")
+        sched = BackgroundScheduler()
+        scheduler.register_jobs(sched)
+        job = sched.get_job("research_scan")
+        trigger_str = str(job.trigger)
+        assert "hour='1'" in trigger_str
+        assert "minute='15'" in trigger_str
+        assert "mon-fri" in trigger_str
+
+    def test_research_time_defaults_to_midnight_when_unset(self, monkeypatch):
+        monkeypatch.setenv("FEATURES", "schwab,sp500")
+        sched = BackgroundScheduler()
+        scheduler.register_jobs(sched)
+        job = sched.get_job("research_scan")
+        trigger_str = str(job.trigger)
+        assert "hour='0'" in trigger_str
+        assert "minute='0'" in trigger_str
+        assert "mon-fri" in trigger_str
+
+    def test_research_time_defaults_to_midnight_on_garbage_setting(self, monkeypatch):
+        monkeypatch.setenv("FEATURES", "schwab,sp500")
+        web.db.set_app_setting("SCHEDULE_RESEARCH_TIME", "nope")
+        sched = BackgroundScheduler()
+        scheduler.register_jobs(sched)  # must not raise
+        job = sched.get_job("research_scan")
+        trigger_str = str(job.trigger)
+        assert "hour='0'" in trigger_str
+        assert "minute='0'" in trigger_str
+
+    def test_research_retry_is_fifteen_minute_interval(self, monkeypatch):
+        monkeypatch.setenv("FEATURES", "schwab,sp500")
+        sched = BackgroundScheduler()
+        scheduler.register_jobs(sched)
+        job = sched.get_job("research_retry")
+        assert job is not None
+        assert job.func is scheduler.job_research_retry
+        assert isinstance(job.trigger, IntervalTrigger)
+        assert job.trigger.interval.total_seconds() == 15 * 60
