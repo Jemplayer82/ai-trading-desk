@@ -54,7 +54,9 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net"
 
 # Stuck-run reaper thresholds (minutes). A run quiet past its limit is treated as a
 # crashed worker. The scan heartbeat (every 2 min by default) keeps live scans fresh,
-# so 120 only trips on a dead worker.
+# so 120 only trips on a dead worker. A portfolio container crash/restart/OOM is
+# recovered at portfolio startup (web/portfolio_main.py _startup fails orphaned
+# spy_scans rows), so this stall only matters for a worker that hangs in-process.
 STUCK_SCAN_STALL_MIN = int(os.environ.get("STUCK_SCAN_STALL_MIN", "120"))
 STUCK_ANALYSIS_MIN = int(os.environ.get("STUCK_ANALYSIS_MIN", "90"))
 

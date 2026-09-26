@@ -31,7 +31,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from . import auth_app, db, features, scan_queue
+from . import alerts, auth_app, db, features, scan_queue
 from . import credentials as creds
 from ._logging import configure_logging
 
@@ -71,6 +71,47 @@ def _startup() -> None:
         db.purge_stale_activity()
     except Exception:
         log.exception("[startup] purge_stale_activity failed")
+    _recover_interrupted_scans()
+
+
+_INTERRUPTED_ERR = "interrupted — portfolio service restarted while this run was in progress"
+
+
+def _recover_interrupted_scans() -> None:
+    """Fail spy_scans rows orphaned by a crash/OOM/restart, then kick the queue.
+
+    Safe because this single-process app owns every spy_scans worker thread, so
+    nothing in flight can be alive at startup. Without this the dead rows block
+    ensure_research_scan / start_allocation (they skip only failed/cancelled
+    rows) until the scheduler reaper's 120-min stall trips, which can land past
+    the 05:30 ET research retry cutoff. Never raises.
+    """
+    if features.enabled("sp500") or features.enabled("options"):
+        try:
+            for row in db.fail_interrupted_spy_scans(_INTERRUPTED_ERR):
+                kind = row.get("kind")
+                label = {
+                    "options": "Options scan",
+                    "research": "Research",
+                    "equity": "S&P 500 scan",
+                }.get(kind, "S&P 500 scan")
+                if kind != "research" and (
+                    row.get("research_scan_id") is not None
+                    or row.get("status") == "running_wait_research"
+                ):
+                    label += " (allocation)"
+                log.warning("[startup] failed interrupted %s %s (was %s)",
+                            label, row["id"], row.get("status"))
+                alerts.notify_run_failed(kind=label, run_id=row["id"],
+                                         label=row.get("trade_date") or "",
+                                         error=_INTERRUPTED_ERR)
+        except Exception:
+            log.exception("[startup] interrupted-scan recovery failed")
+    # Queued rows stranded behind a dead worker start now, not at the next reaper sweep.
+    try:
+        scan_queue._advance_queue_if_idle()
+    except Exception:
+        log.exception("[startup] advance-queue kick failed")
 
 
 # ---------- Scan queue introspection ----------

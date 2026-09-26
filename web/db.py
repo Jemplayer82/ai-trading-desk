@@ -1242,6 +1242,26 @@ def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def fail_interrupted_spy_scans(error: str) -> list[dict[str, Any]]:
+    """Fail every in-flight spy_scans row; return them (pre-update values).
+
+    Called at portfolio startup: every spy_scans worker is a thread inside that
+    single process, so any row still in flight when it starts is an orphan from
+    the previous process. 'queued' rows are left for the queue to dispatch.
+    """
+    live = "status NOT IN ('completed', 'cancelled', 'failed', 'queued')"
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT id, trade_date, kind, status, research_scan_id FROM spy_scans WHERE {live}"
+        ).fetchall()
+        if rows:
+            conn.execute(
+                f"UPDATE spy_scans SET status = 'failed', error = ? WHERE {live}",
+                (error,),
+            )
+    return [dict(r) for r in rows]
+
+
 def find_stuck_analyses(created_before_iso: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
