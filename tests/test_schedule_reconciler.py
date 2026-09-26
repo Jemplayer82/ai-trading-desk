@@ -28,6 +28,13 @@ def _features_from_env():
 
 
 @pytest.fixture
+def trading_day(monkeypatch):
+    """Pin the per-account/all-accounts allocation jobs to a trading day so the
+    direct-invocation tests don't depend on the real weekday or holidays."""
+    monkeypatch.setattr(scheduler.market_calendar, "is_trading_day", lambda d=None: True)
+
+
+@pytest.fixture
 def tmp_db(monkeypatch, tmp_path):
     """Use an isolated sqlite DB and enable all relevant features by default."""
     monkeypatch.setenv("FEATURES", "schwab,sp500,options")
@@ -121,7 +128,7 @@ def test_reconcile_creates_equity_job(tmp_db):
     assert job.func is scheduler.job_spy_scan_account
     assert job.args == (aid,)  # APScheduler stores args as a tuple
     ts = str(job.trigger)
-    assert "day_of_week='sat'" in ts
+    assert "day_of_week='mon-fri'" in ts
     assert "hour='9'" in ts
     assert "minute='30'" in ts
 
@@ -259,7 +266,7 @@ class _FakeResponse:
         self.text = text
 
 
-def test_job_spy_scan_account_posts_to_portfolio_url(monkeypatch):
+def test_job_spy_scan_account_posts_to_portfolio_url(monkeypatch, trading_day):
     account_id = 4242
     calls = []
 
@@ -280,7 +287,7 @@ def test_job_spy_scan_account_posts_to_portfolio_url(monkeypatch):
     assert isinstance(kwargs.get("headers"), dict)
 
 
-def test_job_options_scan_account_posts_to_portfolio_url(monkeypatch):
+def test_job_options_scan_account_posts_to_portfolio_url(monkeypatch, trading_day):
     account_id = 4243
     calls = []
 
@@ -301,7 +308,7 @@ def test_job_options_scan_account_posts_to_portfolio_url(monkeypatch):
     assert isinstance(kwargs.get("headers"), dict)
 
 
-def test_job_spy_scan_account_notifies_on_5xx(monkeypatch):
+def test_job_spy_scan_account_notifies_on_5xx(monkeypatch, trading_day):
     account_id = 4244
     error_text = "database timeout in spy scan queue"
 
@@ -326,7 +333,7 @@ def test_job_spy_scan_account_notifies_on_5xx(monkeypatch):
     assert notify_calls[0][1].get("link") == scheduler.DASHBOARD_URL
 
 
-def test_job_options_scan_account_notifies_on_5xx(monkeypatch):
+def test_job_options_scan_account_notifies_on_5xx(monkeypatch, trading_day):
     account_id = 4245
     error_text = "options chain provider unavailable"
 
@@ -351,7 +358,7 @@ def test_job_options_scan_account_notifies_on_5xx(monkeypatch):
     assert notify_calls[0][1].get("link") == scheduler.DASHBOARD_URL
 
 
-def test_job_spy_scan_account_does_not_notify_on_2xx(monkeypatch):
+def test_job_spy_scan_account_does_not_notify_on_2xx(monkeypatch, trading_day):
     account_id = 4246
     notify_calls = []
 
@@ -367,7 +374,7 @@ def test_job_spy_scan_account_does_not_notify_on_2xx(monkeypatch):
     assert len(notify_calls) == 0
 
 
-def test_job_options_scan_account_does_not_notify_on_2xx(monkeypatch):
+def test_job_options_scan_account_does_not_notify_on_2xx(monkeypatch, trading_day):
     account_id = 4247
     notify_calls = []
 
@@ -381,6 +388,111 @@ def test_job_options_scan_account_does_not_notify_on_2xx(monkeypatch):
     scheduler.job_options_scan_account(account_id)
 
     assert len(notify_calls) == 0
+
+
+# --- trading-day guards ---
+
+def _patch_non_trading_day(monkeypatch):
+    post_calls = []
+    notify_calls = []
+    monkeypatch.setattr(scheduler.market_calendar, "is_trading_day", lambda d=None: False)
+    monkeypatch.setattr("httpx.post", lambda *a, **k: post_calls.append((a, k)))
+    monkeypatch.setattr(
+        scheduler.alerts, "notify", lambda *args, **kwargs: notify_calls.append((args, kwargs))
+    )
+    return post_calls, notify_calls
+
+
+def test_job_spy_scan_account_skips_non_trading_day(monkeypatch):
+    post_calls, notify_calls = _patch_non_trading_day(monkeypatch)
+
+    scheduler.job_spy_scan_account(4250)
+
+    assert post_calls == []
+    assert notify_calls == []
+
+
+def test_job_options_scan_account_skips_non_trading_day(monkeypatch):
+    post_calls, notify_calls = _patch_non_trading_day(monkeypatch)
+
+    scheduler.job_options_scan_account(4251)
+
+    assert post_calls == []
+    assert notify_calls == []
+
+
+def test_job_options_scan_skips_non_trading_day(monkeypatch):
+    post_calls, notify_calls = _patch_non_trading_day(monkeypatch)
+
+    scheduler.job_options_scan()
+
+    assert post_calls == []
+    assert notify_calls == []
+
+
+# --- stuck-run reaper labels ---
+
+def _stale_spy_scan(**kwargs):
+    sid = db.create_spy_scan("2026-09-29", **kwargs)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE spy_scans SET updated_at=?, created_at=? WHERE id=?",
+            ("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z", sid),
+        )
+    return sid
+
+
+@pytest.fixture
+def reaper_env(tmp_db, monkeypatch):
+    notified = []
+    monkeypatch.setattr(scheduler.alerts, "notify_run_failed", lambda **kw: notified.append(kw))
+    monkeypatch.setattr(scheduler.alerts, "notify", lambda *args, **kwargs: None)
+
+    def _no_post(*_a, **_k):
+        raise RuntimeError("no network in tests")
+
+    monkeypatch.setattr("httpx.post", _no_post)
+    return notified
+
+
+def _labels_by_run(notified):
+    return {n["run_id"]: n["kind"] for n in notified}
+
+
+def test_reaper_labels_research_row(reaper_env):
+    sid = _stale_spy_scan(kind="research", status="running")
+
+    scheduler.job_reap_stuck_runs()
+
+    assert _labels_by_run(reaper_env)[sid] == "Research"
+    assert db.get_spy_scan(sid)["status"] == "failed"
+
+
+def test_reaper_labels_options_allocation_row(reaper_env):
+    research_id = db.create_spy_scan("2026-09-29", kind="research", status="completed")
+    sid = _stale_spy_scan(kind="options", status="running", research_scan_id=research_id)
+
+    scheduler.job_reap_stuck_runs()
+
+    labels = _labels_by_run(reaper_env)
+    assert labels[sid] == "Options scan (allocation)"
+    assert research_id not in labels
+
+
+def test_reaper_labels_equity_waiting_allocation_row(reaper_env):
+    sid = _stale_spy_scan(kind="equity", status="running_wait_research")
+
+    scheduler.job_reap_stuck_runs()
+
+    assert _labels_by_run(reaper_env)[sid] == "S&P 500 scan (allocation)"
+
+
+def test_reaper_labels_legacy_equity_row(reaper_env):
+    sid = _stale_spy_scan(kind="equity", status="running")
+
+    scheduler.job_reap_stuck_runs()
+
+    assert _labels_by_run(reaper_env)[sid] == "S&P 500 scan"
 
 
 # --- nightly scan reconciler branch ---

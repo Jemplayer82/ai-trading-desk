@@ -13,13 +13,13 @@ Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
     23:30 Mon-Fri        outcome sweep       (in-process — resolves pending memory-log entries)
     05:00 daily          morning newsletter  (in-process)
     hourly               Schwab token health GET /api/auth/schwab/status
-    per-account          S&P 500 scan        POST /api/spy-scan (one job per equity account)
+    per-account          S&P 500 allocation  POST /api/spy-scan (Mon-Fri at each account's time, default 09:00; fills after 09:35)
     Mon-Fri 09:00-16:00  SPY price refresh   POST /api/spy-scans/latest/refresh-prices
-    per-account          options scan        POST /api/options-scan (one job per options account)
+    per-account          options allocation  POST /api/options-scan (Mon-Fri at each account's time, default 09:00; fills after 09:35)
     Mon-Fri 10:00-16:00  options mark        POST /api/options-positions/refresh (+16:45 close pass)
     Mon-Fri 20:00        options settlement  POST /api/options-positions/settle
-    settings-driven      daily research      POST /api/research-scan (default 00:00 Mon-Fri, trading days only)
-    every 15 min         research retry      re-POSTs research if missing/failed, before 05:30 ET
+    settings-driven      research_scan       POST /api/research-scan (default 00:00 Mon-Fri, NYSE holidays skipped)
+    every 15 min         research_retry      re-POSTs research if missing/failed, only before 05:30 ET
     every 60s            schedule_reconciler  syncs per-account scan jobs + nightly scan/research times
 
 Each job also has a --run-*-now CLI flag for one-shot manual runs (handy for
@@ -362,29 +362,16 @@ def job_research_retry() -> None:
         log.exception("[research_retry] crashed")
 
 
-def job_spy_scan() -> None:
-    log.info("[spy_scan] firing S&P 500 scan at %s", PORTFOLIO_URL)
-    try:
-        r = httpx.post(f"{PORTFOLIO_URL}/api/spy-scan", timeout=60, headers=_internal_headers())
-        log.info("[spy_scan] response %s: %s", r.status_code, r.text[:400])
-        if r.status_code >= 400:
-            alerts.notify(
-                f"⚠️ Weekly S&P 500 scan rejected ({r.status_code}).",
-                r.text[:_ALERT_DETAIL_MAX],
-                link=DASHBOARD_URL,
-            )
-    except Exception as exc:
-        log.exception("[spy_scan] failed: %s", exc)
-        alerts.notify(
-            "⚠️ Weekly S&P 500 scan failed to start.",
-            str(exc),
-            link=DASHBOARD_URL,
-        )
-
-
 def job_spy_scan_account(account_id: int) -> None:
-    """Weekly S&P 500 scan for ONE paper account."""
-    log.info("[spy_scan_acct_%d] firing account scan at %s", account_id, PORTFOLIO_URL)
+    """Daily S&P 500 allocation for ONE equity paper account.
+
+    Skips NYSE holidays; the endpoint waits for today's shared research and
+    fills after the open.
+    """
+    if not market_calendar.is_trading_day(market_calendar.today_et()):
+        log.info("[spy_scan_acct_%d] not a trading day — Daily S&P 500 allocation skipped", account_id)
+        return
+    log.info("[spy_scan_acct_%d] firing Daily S&P 500 allocation at %s", account_id, PORTFOLIO_URL)
     try:
         r = httpx.post(
             f"{PORTFOLIO_URL}/api/spy-scan",
@@ -395,14 +382,14 @@ def job_spy_scan_account(account_id: int) -> None:
         log.info("[spy_scan_acct_%d] response %s: %s", account_id, r.status_code, r.text[:400])
         if r.status_code >= 400:
             alerts.notify(
-                f"⚠️ Weekly S&P 500 scan rejected for account {account_id} ({r.status_code}).",
+                f"⚠️ Daily S&P 500 allocation rejected for account {account_id} ({r.status_code}).",
                 r.text[:_ALERT_DETAIL_MAX],
                 link=DASHBOARD_URL,
             )
     except Exception as exc:
         log.exception("[spy_scan_acct_%d] failed: %s", account_id, exc)
         alerts.notify(
-            f"⚠️ Weekly S&P 500 scan failed to start for account {account_id}.",
+            f"⚠️ Daily S&P 500 allocation failed to start for account {account_id}.",
             str(exc),
             link=DASHBOARD_URL,
         )
@@ -419,13 +406,16 @@ def job_spy_price_refresh() -> None:
 
 
 def job_options_scan() -> None:
-    """Kick off the daily options build for every options paper account.
+    """Kick off the Daily options allocation for every options paper account.
 
-    The endpoint is idempotent per (account, day) and queues background
-    workers, so the 60s timeout covers request startup only. A 409 means no
-    options accounts exist yet — informational, not a failure.
+    Skips NYSE holidays. The endpoint is idempotent per (account, day) and
+    queues background workers, so the 60s timeout covers request startup only.
+    A 409 means no options accounts exist yet — informational, not a failure.
     """
-    log.info("[options_scan] firing daily options scan at %s", PORTFOLIO_URL)
+    if not market_calendar.is_trading_day(market_calendar.today_et()):
+        log.info("[options_scan] not a trading day — Daily options allocation skipped")
+        return
+    log.info("[options_scan] firing Daily options allocation at %s", PORTFOLIO_URL)
     try:
         r = httpx.post(f"{PORTFOLIO_URL}/api/options-scan", timeout=60, headers=_internal_headers())
         if r.status_code == 409:
@@ -437,8 +427,11 @@ def job_options_scan() -> None:
 
 
 def job_options_scan_account(account_id: int) -> None:
-    """Daily options build for ONE options paper account."""
-    log.info("[options_scan_acct_%d] firing options scan at %s", account_id, PORTFOLIO_URL)
+    """Daily options allocation for ONE options paper account (skips NYSE holidays)."""
+    if not market_calendar.is_trading_day(market_calendar.today_et()):
+        log.info("[options_scan_acct_%d] not a trading day — Daily options allocation skipped", account_id)
+        return
+    log.info("[options_scan_acct_%d] firing Daily options allocation at %s", account_id, PORTFOLIO_URL)
     try:
         r = httpx.post(
             f"{PORTFOLIO_URL}/api/options-scan",
@@ -452,14 +445,14 @@ def job_options_scan_account(account_id: int) -> None:
             log.info("[options_scan_acct_%d] response %s: %s", account_id, r.status_code, r.text[:400])
             if r.status_code >= 400:
                 alerts.notify(
-                    f"⚠️ Daily options scan rejected for account {account_id} ({r.status_code}).",
+                    f"⚠️ Daily options allocation rejected for account {account_id} ({r.status_code}).",
                     r.text[:_ALERT_DETAIL_MAX],
                     link=DASHBOARD_URL,
                 )
     except Exception as exc:
         log.exception("[options_scan_acct_%d] failed: %s", account_id, exc)
         alerts.notify(
-            f"⚠️ Daily options scan failed to start for account {account_id}.",
+            f"⚠️ Daily options allocation failed to start for account {account_id}.",
             str(exc),
             link=DASHBOARD_URL,
         )
@@ -553,7 +546,7 @@ def job_options_grade() -> None:
 
 _ACCOUNT_JOBS = {
     # kind -> (job-id template, job function, FIXED day-of-week)
-    "equity":  ("spy_scan_acct_{}",     job_spy_scan_account,     "sat"),
+    "equity":  ("spy_scan_acct_{}",     job_spy_scan_account,     "mon-fri"),
     "options": ("options_scan_acct_{}", job_options_scan_account, "mon-fri"),
 }
 
@@ -689,10 +682,11 @@ def job_reconcile_schedules(sched) -> None:
 
 
 # Tickers that are always worth an LLM reflection regardless of holdings.
-# Mirrors the ALWAYS_DEEP tuple in the tier-4 options engine
-# byte-for-byte rather than importing it: that file is tier-4-only, this
-# scheduler ships at every tier, and the leak canary is a plain text grep
-# over module names — even a function-local import would trip it. Keep in sync.
+# Mirrors the ALWAYS_DEEP tuple in web/research_engine.py byte-for-byte rather
+# than importing it: research_engine is tier-3, while this scheduler ships at
+# every tier and may import only tier-agnostic modules. (The leak canary in
+# scripts/make_tier.py is AST-based and flags only unconditional top-level
+# imports, but a top-level import here would be exactly that.) Keep in sync.
 _ALWAYS_RELEVANT = ("SPY",)
 
 # How far back an analysis counts as "someone is watching this ticker".
@@ -914,7 +908,16 @@ def job_reap_stuck_runs() -> None:
         if features.enabled("sp500") or features.enabled("options"):
             for scan in db.find_stuck_spy_scans(scan_cutoff):
                 db.fail_spy_scan(scan["id"], scan_err)
-                kind_label = "Options scan" if scan.get("kind") == "options" else "S&P 500 scan"
+                kind_label = {
+                    "options": "Options scan",
+                    "research": "Research",
+                    "equity": "S&P 500 scan",
+                }.get(scan.get("kind"), "S&P 500 scan")
+                if scan.get("kind") != "research" and (
+                    scan.get("research_scan_id") is not None
+                    or scan.get("status") == "running_wait_research"
+                ):
+                    kind_label += " (allocation)"
                 log.warning("[reaper] failed stuck %s %s", kind_label, scan["id"])
                 alerts.notify_run_failed(kind=kind_label, run_id=scan["id"],
                                          label=scan.get("trade_date") or "", error=scan_err)
@@ -1062,10 +1065,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--send-newsletter-now", action="store_true", help="Run newsletter once and exit")
     parser.add_argument("--run-scan-now", action="store_true", help="Trigger Schwab scan once and exit")
-    parser.add_argument("--run-spy-scan-now", action="store_true", help="Trigger SPY scan once and exit")
+    parser.add_argument("--run-research-now", action="store_true", help="Trigger today's shared research once and exit")
+    parser.add_argument("--run-spy-scan-now", action="store_true",
+                        help="Trigger today's shared research once and exit (alias of --run-research-now)")
     parser.add_argument("--refresh-spy-prices", action="store_true", help="Refresh SPY prices once and exit")
     parser.add_argument("--run-sweep-now", action="store_true", help="Run outcome-resolution sweep once and exit")
-    parser.add_argument("--run-options-scan-now", action="store_true", help="Trigger daily options scan once and exit")
+    parser.add_argument("--run-options-scan-now", action="store_true", help="Trigger daily options allocation once and exit")
     parser.add_argument("--refresh-options-now", action="store_true", help="Refresh option marks once and exit")
     parser.add_argument("--settle-options-now", action="store_true", help="Run options expiry settlement once and exit")
     parser.add_argument("--grade-options-now", action="store_true", help="Run options-ledger grading/reflection once and exit")
@@ -1079,8 +1084,8 @@ def main() -> None:
     if args.run_scan_now:
         job_nightly_scan()
         return
-    if args.run_spy_scan_now:
-        job_spy_scan()
+    if args.run_research_now or args.run_spy_scan_now:
+        job_research_scan()
         return
     if args.refresh_spy_prices:
         job_spy_price_refresh()
@@ -1127,14 +1132,17 @@ def main() -> None:
         log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
         log.info(" - token_health       every 1h")
     if features.enabled("sp500"):
-        log.info(" - spy_scan           per-account cron configured in dashboard (reconciled by schedule_reconciler)")
+        rh, rm = research_time()
+        log.info(" - research_scan      cron %02d:%02d Mon-Fri %s (settings-driven, NYSE holidays skipped)", rh, rm, TIMEZONE)
+        log.info(" - research_retry     every 15m before 05:30 ET (missing/failed research)")
+        log.info(" - spy_scan           per-account daily allocation Mon-Fri (reconciled by schedule_reconciler)")
         log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
     log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
              STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
-    log.info(" - schedule_reconciler every 60s (syncs per-account scan jobs + nightly scan time)")
+    log.info(" - schedule_reconciler every 60s (syncs per-account jobs + nightly scan/research times)")
     log.info(" - outcome_sweep      cron 23:30 Mon-Fri %s", TIMEZONE)
     if features.enabled("options"):
-        log.info(" - options_scan       per-account cron configured in dashboard (reconciled by schedule_reconciler)")
+        log.info(" - options_scan       per-account daily allocation Mon-Fri (reconciled by schedule_reconciler)")
         log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
         log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
         log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
