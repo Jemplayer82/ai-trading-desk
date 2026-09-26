@@ -49,15 +49,21 @@ let portfolioPollTimer = null;
  * Shared scan-queue rendering for every tab's sidebar. The queue is one global
  * FIFO (only one scan runs at a time), served by /api/portfolio/status as
  * { running, queued: [] }. Each item carries scan_type ('portfolio'|'spy') and
- * kind ('equity'|'options'); scanTypeKey collapses those to a single label key
- * so a tab can filter to just its own runs — or, on Run Analysis, show them all.
+ * kind ('equity'|'options'|'research'); scanTypeKey collapses those to a single
+ * label key so a tab can filter to just its own runs — or, on Run Analysis, show
+ * them all. 'research' is the shared daily research scan (no paper account); the
+ * equity/options rows are per-account allocations over it.
  */
-const SCAN_TYPE_TAG = { portfolio: "pf", spy: "spy", options: "opt" };
+const SCAN_TYPE_TAG = { portfolio: "pf", spy: "spy", options: "opt", research: "rsch" };
 
 function scanTypeKey(item) {
   if (!item) return "";
   if (item.scan_type === "portfolio") return "portfolio";
-  if (item.scan_type === "spy") return item.kind === "options" ? "options" : "spy";
+  if (item.scan_type === "spy") {
+    if (item.kind === "options") return "options";
+    if (item.kind === "research") return "research";
+    return "spy";
+  }
   return item.scan_type || "";
 }
 
@@ -588,12 +594,13 @@ async function applySchwabVisibility(enabledOverride) {
 // Jump to a running scan's own tab and open it (queue items are cross-type here).
 function _openRunningScan(item) {
   const key = scanTypeKey(item);
-  const tab = { portfolio: "portfolio", spy: "spy", options: "options" }[key];
+  // Research lives on the S&P tab; the generic /api/spy-scans/{id} route serves it.
+  const tab = { portfolio: "portfolio", spy: "spy", options: "options", research: "spy" }[key];
   if (!tab) return;
   const tabBtn = document.querySelector(`.main-tab[data-tab="${tab}"]`);
   if (tabBtn) tabBtn.click();
   if (key === "portfolio" && typeof loadPortfolioScan === "function") loadPortfolioScan(item.id);
-  else if (key === "spy" && typeof loadSpyScan === "function") loadSpyScan(item.id);
+  else if ((key === "spy" || key === "research") && typeof loadSpyScan === "function") loadSpyScan(item.id);
   else if (key === "options" && typeof loadOptionsScan === "function") loadOptionsScan(item.id);
 }
 
@@ -655,20 +662,31 @@ async function pollScanActivity() {
     if (run && run.scan_type === "portfolio" && run.status === "running") {
       blocks.push(scanActivityPortfolio(run));
     }
+    // Shared daily research (spy row, kind "research", no paper account):
+    // its own "Daily research" block while running or pending. Allocation rows
+    // parked in `running_wait_research` are equity/options rows, not research,
+    // so they never land here.
+    if (run && run.scan_type === "spy" && run.kind === "research") {
+      const st = String(run.status || "");
+      if (st.startsWith("running") || st === "pending") blocks.push(scanActivityResearch(run));
+    }
     // `startsWith("running")` for spy: reproduces the old list predicate
-    // exactly, including the `running_wait_*` states. `kind !== "options"`
-    // because the old spy branch fetched GET /api/spy-scans with its default
-    // `kind="equity"`, so an options build was never surfaced in this banner.
-    // The `waiting` fallback is needed because `running_wait_market` is
-    // excluded from `_is_any_scan_running`'s busy set by default, so a parked
-    // spy scan lands in `waiting`, not `running`. Without this fallback the
-    // wait-state banner would silently disappear. The same `kind !== "options"`
-    // guard is applied to the fallback, since real wait-state rows come from
-    // the options engine and must not be mislabeled as an S&P 500 scan.
+    // exactly, including the `running_wait_*` states (`running_wait_market`,
+    // `running_wait_research`). `kind !== "options"` because the old spy
+    // branch fetched GET /api/spy-scans with its default `kind="equity"`, so an
+    // options build was never surfaced in this banner; `kind !== "research"`
+    // because research rows get their own block above.
+    // The `waiting` fallback is needed because the wait states
+    // (`running_wait_market`, `running_wait_research`) are excluded from
+    // `_is_any_scan_running`'s busy set by default, so a parked spy row lands
+    // in `waiting`, not `running`. Without this fallback the wait-state banner
+    // would silently disappear. The same kind guards are applied to the
+    // fallback, since options wait-state rows must not be mislabeled as an
+    // S&P 500 scan.
     const spy =
-      (run && run.scan_type === "spy" && run.kind !== "options"
+      (run && run.scan_type === "spy" && run.kind !== "options" && run.kind !== "research"
         && String(run.status || "").startsWith("running")) ? run
-      : waiting.find((w) => w.scan_type === "spy" && w.kind !== "options"
+      : waiting.find((w) => w.scan_type === "spy" && w.kind !== "options" && w.kind !== "research"
         && String(w.status || "").startsWith("running"));
     if (spy) blocks.push(scanActivitySpy(spy));
   } catch (e) { /* portfolio app unreachable / not authed — skip */ }
@@ -694,14 +712,32 @@ function scanActivityPortfolio(scan) {
 }
 
 function scanActivitySpy(scan) {
-  const qt = scan.quick_total || 500;
+  const qt = scan.quick_total || 151;
   const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 50;
+  const dt = scan.deep_total || 51;
   const dc = scan.deep_count || 0;
   return (
     '<div class="scan-activity-row">' +
       '<div class="scan-activity-head">' +
         '<a href="#" class="scan-activity-link" data-tab="spy">S&amp;P 500 scan →</a>' +
+      "</div>" +
+      `<div class="scan-activity-sub">Quick ${qc}/${qt}</div>` +
+      progressBar(qc, qt) +
+      `<div class="scan-activity-sub">Deep ${dc}/${dt}</div>` +
+      progressBar(dc, dt) +
+    "</div>"
+  );
+}
+
+function scanActivityResearch(scan) {
+  const qt = scan.quick_total || 151;
+  const qc = scan.quick_count || 0;
+  const dt = scan.deep_total || 51;
+  const dc = scan.deep_count || 0;
+  return (
+    '<div class="scan-activity-row">' +
+      '<div class="scan-activity-head">' +
+        `<a href="#" class="scan-activity-link" data-tab="spy">Daily research #${escapeHtml(String(scan.id ?? ""))} →</a>` +
       "</div>" +
       `<div class="scan-activity-sub">Quick ${qc}/${qt}</div>` +
       progressBar(qc, qt) +

@@ -175,3 +175,96 @@ def test_fetch_failure_hides_banner():
 def test_waiting_options_scan_does_not_render_spy_banner():
     result = _run_poll(WAITING_OPTIONS)
     assert "spy" not in result["html"].lower()
+
+
+RESEARCH_RUNNING = {
+    "running": {
+        "id": 42,
+        "scan_type": "spy",
+        "kind": "research",
+        "status": "running_deep",
+        "quick_count": 151,
+        "quick_total": 151,
+        "deep_count": 10,
+        "deep_total": 51,
+    },
+    "queued": [],
+    "waiting": [],
+}
+
+WAITING_EQUITY_ALLOCATION = {
+    "running": None,
+    "queued": [],
+    "waiting": [
+        {
+            "id": 43,
+            "scan_type": "spy",
+            "kind": "equity",
+            "status": "running_wait_research",
+        }
+    ],
+}
+
+
+def test_research_row_renders_daily_research_banner():
+    result = _run_poll(RESEARCH_RUNNING)
+    assert result["hidden"] is False
+    html = result["html"]
+    assert "Daily research" in html
+    assert "#42" in html
+    assert "10/51" in html
+    assert "S&amp;P 500 scan" not in html
+    assert "S&P 500 scan" not in html
+
+
+def test_waiting_research_allocation_renders_spy_block():
+    result = _run_poll(WAITING_EQUITY_ALLOCATION)
+    assert result["hidden"] is False
+    html = result["html"]
+    assert "S&amp;P 500 scan" in html
+    assert "Daily research" not in html
+
+
+def test_queue_renders_research_item_with_rsch_tag():
+    data = {
+        "running": None,
+        "waiting": [],
+        "queued": [
+            {
+                "id": 7,
+                "scan_type": "spy",
+                "kind": "research",
+                "status": "queued",
+                "trade_date": "2026-09-25",
+                "created_at": None,
+            }
+        ],
+    }
+    script = (
+        "const ul = document.createElement('ul');\n"
+        f"renderScanQueue(ul, {json.dumps(data)});\n"
+        "return ul.children.map((li) => li.innerHTML);"
+    )
+    items = run_js(sources=["utils.js", "portfolio.js"], script=script)
+    assert len(items) == 1
+    assert "rsch #7" in items[0]
+
+
+def test_scan_type_key_research_and_unchanged_keys():
+    script = """
+return {
+    research: scanTypeKey({scan_type: 'spy', kind: 'research'}),
+    options: scanTypeKey({scan_type: 'spy', kind: 'options'}),
+    equity: scanTypeKey({scan_type: 'spy', kind: 'equity'}),
+    portfolio: scanTypeKey({scan_type: 'portfolio'}),
+    tag: SCAN_TYPE_TAG.research,
+};
+"""
+    result = run_js(sources=["utils.js", "portfolio.js"], script=script)
+    assert result == {
+        "research": "research",
+        "options": "options",
+        "equity": "spy",
+        "portfolio": "portfolio",
+        "tag": "rsch",
+    }
