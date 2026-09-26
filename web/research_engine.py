@@ -17,13 +17,16 @@ import logging
 import os
 import threading
 import time as time_mod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import date
 from typing import Any
 
 import yfinance as yf
 
-from . import db, market_cache, market_calendar, spy_scanner
+from . import alerts, db, market_cache, market_calendar, scan_queue, spy_scanner
+from .runner import build_config
+from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
@@ -259,3 +262,258 @@ def wait_for_market_open(scan_id: int) -> None:
             db.update_spy_scan(scan_id, status="running_wait_market")
         ticks += 1
         time_mod.sleep(_MARKET_POLL_SECONDS)
+
+
+# ── Research orchestration ───────────────────────────────────────────────────
+
+def research_aggressiveness() -> int:
+    """The most aggressive paper-account setting drives shared research."""
+    return max(
+        (int(a.get("aggressiveness") or 5) for a in db.list_paper_accounts()),
+        default=5,
+    )
+
+
+def _research_report(
+    trade_date: str,
+    quick: list[dict[str, Any]],
+    top: list[dict[str, Any]],
+    enriched: list[dict[str, Any]],
+) -> str:
+    """Build a markdown summary of the shared research run."""
+    total = len(quick)
+    quick_errored = [r for r in quick if r.get("error")]
+    quick_signals: dict[str, int] = {}
+    for r in quick:
+        sig = (r.get("signal") or "HOLD").upper()
+        quick_signals[sig] = quick_signals.get(sig, 0) + 1
+
+    lines: list[str] = [
+        f"# Shared research — {trade_date}",
+        "",
+        f"Quick-scan total: {total} (errored: {len(quick_errored)})",
+        "Quick-scan signals: "
+        + (
+            ", ".join(f"{k}: {v}" for k, v in sorted(quick_signals.items()))
+            or "none"
+        ),
+        "",
+    ]
+
+    completed = [e for e in enriched if not e.get("error")]
+    failed = [e for e in enriched if e.get("error")]
+    reused = [e for e in enriched if e.get("reused_from") is not None]
+
+    lines.append(
+        f"Deep-dive targets: {len(top)}, completed: {len(completed)}, "
+        f"reused: {len(reused)}, failed: {len(failed)}"
+    )
+
+    deep_signals: dict[str, int] = {}
+    for e in enriched:
+        sig = (e.get("signal") or "HOLD").upper()
+        deep_signals[sig] = deep_signals.get(sig, 0) + 1
+
+    lines.append(
+        "Deep-dive ratings: "
+        + (
+            ", ".join(f"{k}: {v}" for k, v in sorted(deep_signals.items()))
+            or "none"
+        )
+    )
+
+    if failed:
+        lines.append("")
+        lines.append("Failed tickers:")
+        for e in failed:
+            ticker = e.get("ticker", "UNKNOWN")
+            err = str(e.get("error", ""))[:120]
+            lines.append(f"- {ticker}: {err}")
+
+    return "\n".join(lines)
+
+
+def run_research(scan_id: int, trade_date: str) -> None:
+    """Run the shared daily research scan (phases 1-2 of the old options build).
+
+    Creates a single `kind='research'` row whose results feed every daily
+    allocation pass. Raises on failure; the caller's worker wrapper records
+    cancelled/failed status.
+    """
+    scan = db.get_spy_scan(scan_id)
+    if not scan:
+        raise RuntimeError(f"Research scan {scan_id} not found")
+
+    prefs = db.get_preferences() or {}
+    selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
+    config = build_config({
+        **prefs,
+        "aggressiveness": int(scan.get("aggressiveness") or research_aggressiveness()),
+        "bias": "neutral",
+    })
+
+    log.info("[research %s] starting research scan for %s", scan_id, trade_date)
+
+    with _phase("Couldn't fetch the S&P 500 ticker list"):
+        universe = get_sp500_tickers()
+
+    with _phase("Movers pre-screen failed"):
+        movers = prescreen(universe, PRESCREEN_TOP, trade_date=trade_date)
+
+    if not movers:
+        raise RuntimeError("Movers pre-screen returned no tickers")
+
+    for sym in ALWAYS_DEEP:
+        if sym not in movers:
+            movers.append(sym)
+
+    log.info(
+        "[research %s] quick-scanning %d movers (top %d + %s)",
+        scan_id,
+        len(movers),
+        PRESCREEN_TOP,
+        ",".join(ALWAYS_DEEP),
+    )
+
+    with _phase("Quick scan failed"):
+        quick = spy_scanner.run_quick_scan(scan_id, movers, trade_date, config)
+
+    if db.is_spy_scan_cancelled(scan_id):
+        raise spy_scanner.ScanCancelled()
+
+    spy_scanner.assert_quick_scan_healthy(quick)
+
+    top = select_deep_dive_targets(quick)
+    enriched: list[dict[str, Any]] = []
+
+    if top:
+        with _phase("Deep-dive analysis failed"):
+            enriched = spy_scanner.run_deep_dives(
+                scan_id, top, trade_date, config, selected_analysts
+            )
+        spy_scanner.assert_deep_dives_healthy(enriched)
+    else:
+        db.update_spy_scan(scan_id, deep_total=0, deep_count=0)
+
+    if db.is_spy_scan_cancelled(scan_id):
+        raise spy_scanner.ScanCancelled()
+
+    db.complete_spy_scan(
+        scan_id,
+        allocator_report=_research_report(trade_date, quick, top, enriched),
+        portfolio_json=[],
+        previous_scan_id=None,
+        starting_value=None,
+    )
+
+    log.info("[research %s] completed", scan_id)
+
+
+class NotTradingDay(Exception):
+    """Raised when a research run is requested for a non-NYSE trading day."""
+
+
+def require_trading_day(today: str, force: bool) -> None:
+    """Refuse to start a daily research scan on weekends/holidays unless forced."""
+    if not force and not market_calendar.is_trading_day(date.fromisoformat(today)):
+        raise NotTradingDay(
+            f"{today} is not an NYSE trading day (weekend or holiday) "
+            "— pass force to run anyway"
+        )
+
+
+def run_worker(
+    scan_id: int,
+    trade_date: str,
+    work: Callable[[int, str], None],
+    *,
+    alert_kind: str,
+    holds_slot: bool,
+) -> None:
+    """Shared worker-thread wrapper for research and allocation runs.
+
+    Refreshes credentials, runs ``work(scan_id, trade_date)``, and records
+    cancellation, failure, or queue advancement.
+
+    Allocation rows never hold the compute slot. An unguarded dequeue from one
+    would start queued work beside a running research scan, so allocation
+    workers use the idle-guarded advance.
+    """
+    scan_queue.refresh_creds_from_db()
+    try:
+        work(scan_id, trade_date)
+    except spy_scanner.ScanCancelled:
+        log.info("[worker %s] scan cancelled", scan_id)
+        db.update_spy_scan(scan_id, status="cancelled")
+    except Exception as exc:
+        log.exception("[worker %s] work failed: %s", scan_id, exc)
+        db.fail_spy_scan(scan_id, str(exc))
+        alerts.notify_run_failed(
+            kind=alert_kind,
+            run_id=scan_id,
+            label=trade_date,
+            error=str(exc),
+        )
+    finally:
+        if holds_slot:
+            scan_queue._dequeue_next_scan()
+        else:
+            scan_queue._advance_queue_if_idle()
+
+
+def ensure_research_scan(today: str) -> dict[str, Any]:
+    """Idempotently create and start the daily shared research scan for ``today``."""
+    with scan_queue._SCAN_LOCK:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT id, status FROM spy_scans "
+                "WHERE kind = 'research' AND trade_date = ? "
+                "AND status NOT IN ('failed', 'cancelled') "
+                "ORDER BY id DESC LIMIT 1",
+                (today,),
+            ).fetchone()
+            if row:
+                return {"scan_id": row["id"], "status": row["status"], "new": False}
+
+        with db.connect() as conn:
+            busy = scan_queue._is_any_scan_running(conn)
+
+        aggr = research_aggressiveness()
+
+        if busy:
+            sid = db.create_spy_scan(
+                today,
+                paper_account_id=None,
+                aggressiveness=aggr,
+                bias="neutral",
+                status="queued",
+                kind="research",
+            )
+            log.info(
+                "[queue] research scan %s queued behind %s scan #%s",
+                sid,
+                busy.get("scan_type") or busy.get("kind"),
+                busy["id"],
+            )
+            return {
+                "scan_id": sid,
+                "status": "queued",
+                "new": True,
+                "queued_behind": dict(busy),
+            }
+
+        sid = db.create_spy_scan(
+            today,
+            paper_account_id=None,
+            aggressiveness=aggr,
+            bias="neutral",
+            kind="research",
+        )
+
+    target = scan_queue.resolve_runner("research")
+    if target is None:
+        db.fail_spy_scan(sid, "research runner not registered")
+        raise RuntimeError("research runner not registered")
+
+    scan_queue.spawn_worker(target, sid, today)
+    return {"scan_id": sid, "status": "pending", "new": True}

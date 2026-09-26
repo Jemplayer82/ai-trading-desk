@@ -9,12 +9,13 @@ from __future__ import annotations
 import threading
 import time as time_mod
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
 import pytest
 
-from web import db, market_cache, market_calendar, research_engine, spy_scanner
+from web import alerts, db, market_cache, market_calendar, research_engine, scan_queue, spy_scanner
 
 pytestmark = pytest.mark.unit
 
@@ -557,3 +558,343 @@ class TestWaitForMarketOpenHolidayAware:
         )
         research_engine.wait_for_market_open(scan_id)
         assert db.get_spy_scan_status(scan_id)["status"] == "pending"
+
+
+# ── Research orchestration ───────────────────────────────────────────────────
+
+def test_run_research_happy_path(tmp_db, monkeypatch):
+    td = "2026-06-02"
+
+    monkeypatch.setattr(research_engine, "get_sp500_tickers", lambda: ["AAA", "BBB", "CCC"])
+
+    prescreen_calls: list[tuple[list[str], int, str]] = []
+
+    def fake_prescreen(tickers, top_n, *, trade_date):
+        prescreen_calls.append((list(tickers), top_n, trade_date))
+        return ["AAA", "BBB"]
+
+    monkeypatch.setattr(research_engine, "prescreen", fake_prescreen)
+
+    config_calls: list[dict[str, Any]] = []
+
+    def fake_build_config(params):
+        config_calls.append(params)
+        return {}
+
+    monkeypatch.setattr(research_engine, "build_config", fake_build_config)
+
+    quick_calls: list[tuple[int, list[str], str, dict[str, Any]]] = []
+
+    def fake_quick_scan(scan_id, tickers, trade_date, config):
+        quick_calls.append((scan_id, list(tickers), trade_date, config))
+        return [
+            {"ticker": "AAA", "signal": "BUY", "conviction": 9},
+            {"ticker": "BBB", "signal": "SELL", "conviction": 8},
+            {"ticker": "SPY", "signal": "HOLD", "conviction": 3},
+        ]
+
+    monkeypatch.setattr(spy_scanner, "run_quick_scan", fake_quick_scan)
+
+    deep_calls: list[tuple[int, list[str], str, dict[str, Any], list[str]]] = []
+
+    def fake_deep_dives(scan_id, candidates, trade_date, config, analysts):
+        deep_calls.append((scan_id, [c["ticker"] for c in candidates], trade_date, config, analysts))
+        return [
+            {"ticker": "AAA", "signal": "BUY", "reused_from": 5},
+            {"ticker": "BBB", "signal": "SELL", "error": "bad thing"},
+            {"ticker": "SPY", "signal": "HOLD"},
+        ]
+
+    monkeypatch.setattr(spy_scanner, "run_deep_dives", fake_deep_dives)
+
+    sid = db.create_spy_scan(td, kind="research", aggressiveness=10)
+    research_engine.run_research(sid, td)
+
+    scan = db.get_spy_scan(sid)
+    assert scan["status"] == "completed"
+    assert scan["portfolio_json"] == []
+
+    assert len(config_calls) == 1
+    assert config_calls[0]["bias"] == "neutral"
+    assert config_calls[0]["aggressiveness"] == 10
+
+    assert len(prescreen_calls) == 1
+    assert prescreen_calls[0][1] == research_engine.PRESCREEN_TOP
+    assert prescreen_calls[0][2] == td
+
+    assert len(quick_calls) == 1
+    assert quick_calls[0][1] == ["AAA", "BBB", "SPY"]
+
+    assert len(deep_calls) == 1
+    assert set(deep_calls[0][1]) == {"AAA", "BBB", "SPY"}
+
+    report = scan["allocator_report"]
+    assert "BUY" in report
+    assert "reused: 1" in report
+    assert "BBB" in report
+    assert "bad thing" in report
+
+
+def test_run_research_no_directional_signals_skips_deep_dives(tmp_db, monkeypatch):
+    td = "2026-06-02"
+
+    monkeypatch.setattr(research_engine, "get_sp500_tickers", lambda: ["AAA", "BBB"])
+    monkeypatch.setattr(
+        research_engine, "prescreen", lambda _t, _n, *, trade_date: ["AAA", "BBB"]
+    )
+    monkeypatch.setattr(research_engine, "build_config", lambda _p: {})
+
+    def fake_quick_scan(_scan_id, _tickers, _trade_date, _config):
+        return [
+            {"ticker": "AAA", "signal": "HOLD", "conviction": 3},
+            {"ticker": "BBB", "signal": "HOLD", "conviction": 2},
+        ]
+
+    monkeypatch.setattr(spy_scanner, "run_quick_scan", fake_quick_scan)
+
+    def fail_deep(*args, **kwargs):
+        raise AssertionError("run_deep_dives should not be called")
+
+    monkeypatch.setattr(spy_scanner, "run_deep_dives", fail_deep)
+
+    sid = db.create_spy_scan(td, kind="research", aggressiveness=5)
+    research_engine.run_research(sid, td)
+
+    scan = db.get_spy_scan(sid)
+    assert scan["status"] == "completed"
+    assert scan["deep_total"] == 0
+
+
+def test_run_research_empty_prescreen_raises(tmp_db, monkeypatch):
+    td = "2026-06-02"
+
+    monkeypatch.setattr(research_engine, "get_sp500_tickers", lambda: ["AAA"])
+    monkeypatch.setattr(
+        research_engine, "prescreen", lambda _t, _n, *, trade_date: []
+    )
+    monkeypatch.setattr(research_engine, "build_config", lambda _p: {})
+
+    sid = db.create_spy_scan(td, kind="research")
+    with pytest.raises(RuntimeError, match="Movers pre-screen returned no tickers"):
+        research_engine.run_research(sid, td)
+
+
+def test_run_research_cancel_during_quick_scan(tmp_db, monkeypatch):
+    td = "2026-06-02"
+
+    monkeypatch.setattr(research_engine, "get_sp500_tickers", lambda: ["AAA"])
+    monkeypatch.setattr(
+        research_engine, "prescreen", lambda _t, _n, *, trade_date: ["AAA"]
+    )
+    monkeypatch.setattr(research_engine, "build_config", lambda _p: {})
+
+    def fake_quick_scan(scan_id, _tickers, _trade_date, _config):
+        db.request_spy_scan_cancel(scan_id)
+        return [{"ticker": "AAA", "signal": "BUY", "conviction": 5}]
+
+    monkeypatch.setattr(spy_scanner, "run_quick_scan", fake_quick_scan)
+
+    sid = db.create_spy_scan(td, kind="research")
+    with pytest.raises(spy_scanner.ScanCancelled):
+        research_engine.run_research(sid, td)
+
+
+def test_research_aggressiveness_default_with_no_accounts(tmp_db):
+    assert research_engine.research_aggressiveness() == 5
+
+
+def test_research_aggressiveness_uses_max_account_value(tmp_db):
+    db.create_paper_account("conservative", aggressiveness=3)
+    db.create_paper_account("aggressive", aggressiveness=10)
+    assert research_engine.research_aggressiveness() == 10
+
+
+def test_run_worker_cancels_on_scan_cancelled(tmp_db, monkeypatch):
+    monkeypatch.setattr(scan_queue, "refresh_creds_from_db", lambda: None)
+    monkeypatch.setattr(scan_queue, "_dequeue_next_scan", lambda: None)
+
+    sid = db.create_spy_scan("2026-06-02", kind="research")
+
+    def work(_s, _t):
+        raise spy_scanner.ScanCancelled()
+
+    research_engine.run_worker(
+        sid, "2026-06-02", work, alert_kind="research", holds_slot=True
+    )
+
+    assert db.get_spy_scan_status(sid)["status"] == "cancelled"
+
+
+def test_run_worker_fails_and_alerts_on_exception(tmp_db, monkeypatch):
+    monkeypatch.setattr(scan_queue, "refresh_creds_from_db", lambda: None)
+    monkeypatch.setattr(scan_queue, "_advance_queue_if_idle", lambda: None)
+
+    notified: list[dict[str, Any]] = []
+
+    def capture_notify(*, kind, run_id, label, error, link=None):
+        notified.append({"kind": kind, "run_id": run_id, "label": label, "error": error})
+
+    monkeypatch.setattr(alerts, "notify_run_failed", capture_notify)
+
+    sid = db.create_spy_scan("2026-06-02", kind="research")
+
+    def work(_s, _t):
+        raise RuntimeError("boom")
+
+    research_engine.run_worker(
+        sid, "2026-06-02", work, alert_kind="research", holds_slot=False
+    )
+
+    assert db.get_spy_scan_status(sid)["status"] == "failed"
+    assert db.get_spy_scan(sid)["error"] == "boom"
+    assert len(notified) == 1
+    assert notified[0]["kind"] == "research"
+    assert notified[0]["run_id"] == sid
+    assert notified[0]["label"] == "2026-06-02"
+    assert notified[0]["error"] == "boom"
+
+
+@pytest.mark.parametrize(
+    "holds_slot,expected",
+    [
+        (True, "_dequeue_next_scan"),
+        (False, "_advance_queue_if_idle"),
+    ],
+)
+def test_run_worker_advancement_depends_on_holds_slot(
+    tmp_db, monkeypatch, holds_slot, expected
+):
+    monkeypatch.setattr(scan_queue, "refresh_creds_from_db", lambda: None)
+
+    called: dict[str, str | None] = {"name": None}
+
+    def dequeue():
+        called["name"] = "_dequeue_next_scan"
+
+    def advance():
+        called["name"] = "_advance_queue_if_idle"
+
+    monkeypatch.setattr(scan_queue, "_dequeue_next_scan", dequeue)
+    monkeypatch.setattr(scan_queue, "_advance_queue_if_idle", advance)
+
+    sid = db.create_spy_scan("2026-06-02", kind="research")
+
+    research_engine.run_worker(
+        sid, "2026-06-02", lambda _s, _t: None, alert_kind="research", holds_slot=holds_slot
+    )
+
+    assert called["name"] == expected
+
+
+def test_ensure_research_scan_creates_and_spawns(tmp_db, monkeypatch):
+    spawns: list[tuple[Any, int, str]] = []
+
+    def record_spawn(target, sid, td):
+        spawns.append((target, sid, td))
+
+    monkeypatch.setattr(scan_queue, "spawn_worker", record_spawn)
+    monkeypatch.setitem(
+        scan_queue._RUNNERS,
+        "research",
+        (SimpleNamespace(run=lambda s, t: None), "run"),
+    )
+
+    td = "2026-06-02"
+    result = research_engine.ensure_research_scan(td)
+
+    assert result["new"] is True
+    assert result["status"] == "pending"
+    sid = result["scan_id"]
+
+    scan = db.get_spy_scan(sid)
+    assert scan["kind"] == "research"
+    assert scan["paper_account_id"] is None
+    assert scan["bias"] == "neutral"
+    assert len(spawns) == 1
+
+    result2 = research_engine.ensure_research_scan(td)
+    assert result2["new"] is False
+    assert result2["scan_id"] == sid
+    assert result2["status"] == "pending"
+    assert len(spawns) == 1
+
+
+def test_ensure_research_scan_after_failed_creates_new(tmp_db, monkeypatch):
+    spawns: list[tuple[Any, int, str]] = []
+
+    def record_spawn(target, sid, td):
+        spawns.append((target, sid, td))
+
+    monkeypatch.setattr(scan_queue, "spawn_worker", record_spawn)
+    monkeypatch.setitem(
+        scan_queue._RUNNERS,
+        "research",
+        (SimpleNamespace(run=lambda s, t: None), "run"),
+    )
+
+    td = "2026-06-02"
+    sid = db.create_spy_scan(td, kind="research", aggressiveness=5)
+    db.fail_spy_scan(sid, "old failure")
+
+    result = research_engine.ensure_research_scan(td)
+
+    assert result["new"] is True
+    assert result["scan_id"] != sid
+    assert result["status"] == "pending"
+    assert len(spawns) == 1
+
+
+def test_ensure_research_scan_queues_when_busy(tmp_db, monkeypatch):
+    spawns: list[Any] = []
+
+    def fail_spawn(*args, **kwargs):
+        spawns.append(True)
+
+    monkeypatch.setattr(scan_queue, "spawn_worker", fail_spawn)
+    monkeypatch.setitem(
+        scan_queue._RUNNERS,
+        "research",
+        (SimpleNamespace(run=lambda s, t: None), "run"),
+    )
+
+    td = "2026-06-02"
+    busy_id = db.create_spy_scan(td, kind="equity", aggressiveness=5)
+    db.update_spy_scan(busy_id, status="running_deep")
+
+    result = research_engine.ensure_research_scan(td)
+
+    assert result["new"] is True
+    assert result["status"] == "queued"
+    assert "queued_behind" in result
+    assert result["queued_behind"]["id"] == busy_id
+    assert len(spawns) == 0
+
+
+def test_ensure_research_scan_missing_runner_fails(tmp_db, monkeypatch):
+    monkeypatch.delitem(scan_queue._RUNNERS, "research", raising=False)
+
+    td = "2026-06-02"
+    with pytest.raises(RuntimeError, match="research runner not registered"):
+        research_engine.ensure_research_scan(td)
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM spy_scans WHERE kind = 'research' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert "research runner not registered" in row["error"]
+
+
+def test_require_trading_day_saturday_raises():
+    with pytest.raises(research_engine.NotTradingDay, match="not an NYSE trading day"):
+        research_engine.require_trading_day("2026-06-06", force=False)
+
+
+def test_require_trading_day_saturday_force_passes():
+    research_engine.require_trading_day("2026-06-06", force=True)
+
+
+def test_require_trading_day_tuesday_passes():
+    research_engine.require_trading_day("2026-06-02", force=False)
