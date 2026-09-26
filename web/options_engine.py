@@ -7,9 +7,9 @@ allocation that consumes it (run_options_allocation, behind
 POST /api/options-scan, cron Mon-Fri):
 
   settle expiries -> wait for the shared research -> wait for 09:35 ET ->
-  under the global allocation lock: mark open contracts to market -> chain
-  fetch + contract vetting over the research's usable deep dives
-  (options_data) -> LLM allocator (options_allocator) -> apply decisions
+  under this account's allocation lock (accounts run in parallel): mark open
+  contracts to market -> contract vetting over the research's usable deep
+  dives, shared by all options accounts (shared_vetted_candidates) -> LLM allocator (options_allocator) -> apply decisions
   through db's transactional position/ledger helpers.
 
 Options runs are spy_scans rows with kind='options', so progress counters,
@@ -26,7 +26,10 @@ exposes market data and account reads exclusively.
 """
 from __future__ import annotations
 
+import copy
 import logging
+import threading
+import time as time_mod
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -532,13 +535,52 @@ def _zero_candidate_reason(
             f"contract passed liquidity/delta/DTE vetting{extra} — see the vetting notes below.")
 
 
+# ── Shared contract vetting ──────────────────────────────────────────────────
+# Contract vetting (chain fetch + liquidity/delta/DTE selection) depends only on
+# the shared research, not on the account, and every options account allocates
+# at the open in parallel. Vet once per research row and hand each account its
+# own copy: one set of Schwab chain calls instead of one per account, and every
+# account sees identical contracts and quotes. Failures are never cached.
+_VETTED_TTL_SECONDS = 10 * 60
+_VETTED: dict[tuple[Any, ...], tuple[float, tuple[list[dict[str, Any]], list[str]]]] = {}
+_VETTED_LOCKS: dict[tuple[Any, ...], threading.Lock] = {}
+_VETTED_GUARD = threading.Lock()
+
+
+def shared_vetted_candidates(
+    research: dict[str, Any], usable: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """``options_data.fetch_candidates(usable)``, computed once per research row.
+
+    Concurrent callers for the same research wait for the first one (single
+    flight) and then share its result for ``_VETTED_TTL_SECONDS``. Returns deep
+    copies so no account can mutate another's candidates.
+    """
+    key = (research.get("id"), research.get("created_at"))
+    with _VETTED_GUARD:
+        lock = _VETTED_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        now = time_mod.monotonic()
+        hit = _VETTED.get(key)
+        if hit is None or now - hit[0] >= _VETTED_TTL_SECONDS:
+            result = options_data.fetch_candidates(usable)
+            with _VETTED_GUARD:
+                # Keep only the current entry; research rows are one per day.
+                for stale in [k for k in _VETTED if k != key]:
+                    _VETTED.pop(stale, None)
+                    _VETTED_LOCKS.pop(stale, None)
+                _VETTED[key] = (now, result)
+            hit = _VETTED[key]
+        return copy.deepcopy(hit[1])
+
+
 def run_options_allocation(scan_id: int, trade_date: str) -> None:
     """Worker for one account's daily options allocation. Raises on failure
     (the endpoint's thread wrapper records failed/cancelled status).
 
     Settles expiries, then hands off to research_engine.run_allocation, which
     waits for the shared research and the open and calls ``_allocate`` under
-    the global allocation lock."""
+    this account's allocation lock (other accounts allocate in parallel)."""
     scan = db.get_spy_scan(scan_id) or {}
     account_id = scan.get("paper_account_id")
     if not account_id:
@@ -572,7 +614,7 @@ def run_options_allocation(scan_id: int, trade_date: str) -> None:
         # None), which fetch_candidates uses as the chain spot hint.
         usable = ctx.usable
         with _phase("Chain fetch failed"):
-            candidates, chain_notes = options_data.fetch_candidates(usable)
+            candidates, chain_notes = shared_vetted_candidates(ctx.research, usable)
         log.info("[options %s] %d vetted candidates from %d usable deep dives (research #%s)",
                  scan_id, len(candidates), len(usable), ctx.research.get("id"))
 

@@ -547,7 +547,7 @@ function renderSpyScan(scan) {
     const gateText = {
       running_wait_research: "Waiting for today's shared research…",
       running_wait_market: "Waiting for market open (09:35 ET) so entries fill at live quotes.",
-      running_wait_alloc: "Waiting for another account to finish allocating…",
+      running_wait_alloc: "Waiting for this account's other allocation to finish…",
       running_alloc: "Allocating…",
     }[scan.status];
     const gateNote = gateText

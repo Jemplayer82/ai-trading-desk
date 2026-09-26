@@ -171,8 +171,10 @@ factory and resolves credentials in the order: explicit config → DB credential
   `'options'`; `'spy'` is only the runner dispatch key in
   `research_engine._RUNNER_KEY`, never a row kind) linked to it by
   `research_scan_id`. Allocation rows wait for that research (status
-  `running_wait_research`) and then for the 09:35 ET open, and run one at a
-  time under `research_engine._ALLOC_LOCK`. They never take the compute-queue
+  `running_wait_research`) and then for the 09:35 ET open, then all allocate in
+  parallel, each under its own per-account lock (`research_engine.allocation_lock`,
+  so one account never runs two allocations at once). Options contract vetting is
+  done once per research row and shared (`options_engine.shared_vetted_candidates`). They never take the compute-queue
   slot (only the research row does), so they bypass the queue; every worker
   thread is started through `scan_queue.spawn_worker`.
 - **Secrets at rest** (`web/secret_box.py`): provider API keys and app settings are

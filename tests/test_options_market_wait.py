@@ -80,7 +80,7 @@ class TestRunOptionsAllocation:
         monkeypatch.setattr(options_engine.options_data, "fetch_candidates", fake_fetch_candidates)
 
         def fake_refresh_positions(paper_account_id=None):
-            captured["lock_during_refresh"] = research_engine._ALLOC_LOCK.locked()
+            captured["lock_during_refresh"] = research_engine.allocation_lock(paper_account_id).locked()
             assert captured["lock_during_refresh"] is True
             return {}
 
@@ -106,7 +106,7 @@ class TestRunOptionsAllocation:
         scan_id, rid, captured = self._run(monkeypatch, account_id)
 
         assert captured["lock_during_refresh"] is True
-        assert not research_engine._ALLOC_LOCK.locked()
+        assert not research_engine.allocation_lock(account_id).locked()
         assert db.get_spy_scan_status(scan_id)["status"] == "completed"
 
         row = db.get_spy_scan(scan_id)
@@ -224,3 +224,62 @@ def test_missing_research_past_deadline_fails_allocation(tmp_db, monkeypatch):
     assert [a["kind"] for a in alerts_seen] == ["Options allocation"]
     assert advanced == [1]
     assert dequeued == []
+
+
+class TestSharedVettedCandidates:
+    """Parallel options accounts vet contracts once per research row."""
+
+    def test_single_flight_and_independent_copies(self, monkeypatch):
+        import threading as _threading
+
+        calls: list[int] = []
+        gate = _threading.Event()
+
+        def fake_fetch(rows):
+            calls.append(len(rows))
+            gate.wait(2)
+            return [{"underlying": "AAPL", "mid": 1.0}], ["note"]
+
+        monkeypatch.setattr(options_engine.options_data, "fetch_candidates", fake_fetch)
+        research = {"id": 7, "created_at": "2026-09-28T04:00:00Z"}
+        results: list[Any] = []
+
+        def worker():
+            results.append(options_engine.shared_vetted_candidates(research, [{"ticker": "AAPL"}]))
+
+        threads = [_threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        gate.set()
+        for t in threads:
+            t.join(5)
+
+        assert calls == [1]
+        assert len(results) == 3
+        results[0][0][0]["mid"] = 99.0  # one account mutating its copy...
+        assert results[1][0][0]["mid"] == 1.0  # ...never leaks into another's
+
+    def test_failure_is_not_cached(self, monkeypatch):
+        attempts: list[int] = []
+
+        def flaky(rows):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("chain outage")
+            return [], []
+
+        monkeypatch.setattr(options_engine.options_data, "fetch_candidates", flaky)
+        research = {"id": 8, "created_at": "2026-09-28T04:00:00Z"}
+        with pytest.raises(RuntimeError):
+            options_engine.shared_vetted_candidates(research, [])
+        assert options_engine.shared_vetted_candidates(research, []) == ([], [])
+        assert len(attempts) == 2
+
+    def test_new_research_row_is_vetted_fresh(self, monkeypatch):
+        calls: list[int] = []
+        monkeypatch.setattr(options_engine.options_data, "fetch_candidates",
+                            lambda rows: (calls.append(1), ([], []))[1])
+        options_engine.shared_vetted_candidates({"id": 1, "created_at": "a"}, [])
+        options_engine.shared_vetted_candidates({"id": 1, "created_at": "a"}, [])
+        options_engine.shared_vetted_candidates({"id": 2, "created_at": "b"}, [])
+        assert len(calls) == 2

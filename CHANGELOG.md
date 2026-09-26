@@ -20,7 +20,8 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Per-account allocation rows.** Each account's scheduled allocation
   (default `09:00` ET) creates its own row that waits for the day's research
   (`running_wait_research`, deadline 10:30 ET), then for the 09:35 ET open, and
-  accounts allocate one at a time at live quotes.
+  all accounts allocate in parallel at live quotes (a per-account lock stops one
+  account from allocating twice at once; options contract vetting is shared).
 - **S&P equity accounts trade daily** with a low-churn allocator prompt; the
   weekly Saturday S&P scan is removed.
 - **Bias-neutral research rating.** The Portfolio Manager rating is now

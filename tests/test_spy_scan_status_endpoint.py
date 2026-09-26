@@ -12,7 +12,7 @@ Covers:
   - upsert_spy_quick_result: reasoning/error get truncated at write time
   - _is_any_scan_running: running_wait_market does NOT count as busy (a scan
     sitting in the daily market-open wait is doing no work; serialization of
-    the real allocation phase is handled by research_engine._ALLOC_LOCK, while
+    the real allocation phase is handled by research_engine.allocation_lock, while
     the proactive queue hand-off from the old options wait was removed)
 
 See tests/test_research_engine.py for the running_wait_market /
@@ -134,7 +134,7 @@ class TestIsAnyScanRunningIgnoresWaitMarket:
     """A scan parked in running_wait_market (up to ~2h/day, doing nothing but
     sleeping while waiting for 09:35 ET) must NOT count as 'busy' — it is
     consuming no compute, LLM budget, or CPU. Serialization of the real
-    allocation phase is handled by research_engine._ALLOC_LOCK, not by this
+    allocation phase is handled by research_engine.allocation_lock, not by this
     busy check; the proactive queue hand-off from the old options wait was
     removed."""
 

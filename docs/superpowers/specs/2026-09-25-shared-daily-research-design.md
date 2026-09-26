@@ -47,7 +47,9 @@ Production config: portfolio container `OLLAMA_MAX_CONCURRENCY=8`, `DEEP_DIVE_PE
           wait for today's research (running_wait_research, heartbeating; deadline 10:30)
           → copy the research's quick rows onto the account row (UI/reuse keep working)
           → wait_for_market_open 09:35 (running_wait_market)
-          → under the global allocation lock, one account at a time (running_alloc):
+          → each account under its own allocation lock, all accounts in parallel (running_alloc)
+            [amended 2026-09-26 by Landon: "trades can be parallel"; options contract
+            vetting is done once per research row and shared]:
               options: refresh_positions → fetch_candidates over the research's usable dives
                        (live spot) → lessons → options_allocator.run → open/close/hold
               equity:  refresh prior portfolio to market (stops) → long-only candidates

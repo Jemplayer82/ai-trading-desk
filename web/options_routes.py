@@ -9,9 +9,9 @@ Options runs are spy_scans rows with kind='options' (same progress/cancel/
 reaper machinery); positions + cash live in their own normalized tables. nginx
 routes /api/options* to the portfolio app via its own location block. They are
 per-account allocation rows over the shared daily research
-(web/research_engine.py) and bypass the compute queue: they serialize only on
-the global allocation lock, and only the shared research holds the compute
-slot.
+(web/research_engine.py) and bypass the compute queue: accounts allocate in
+parallel, each under its own per-account allocation lock, and only the shared
+research holds the compute slot.
 
 Paper-account CRUD is NOT here — it lives in web/spy_routes.py (T3) and serves
 both equity and options accounts, since the tiers are cumulative.

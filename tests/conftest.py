@@ -1,6 +1,7 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,3 +45,17 @@ def mock_llm_client():
         return_value=client,
     ):
         yield client
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_vetting_cache():
+    """options_engine caches vetted contracts per research row (tier 4 only).
+
+    Test DBs reuse research ids, so a cached entry must never leak between tests.
+    Looked up via sys.modules so this tier-agnostic file never imports it.
+    """
+    yield
+    mod = sys.modules.get("web.options_engine")
+    if mod is not None and hasattr(mod, "_VETTED"):
+        mod._VETTED.clear()
+        mod._VETTED_LOCKS.clear()

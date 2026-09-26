@@ -3,7 +3,7 @@
 One `kind='research'` row per NYSE trading day feeds per-account allocation
 rows for the options paper-trading engine (tier 4) and the equity S&P 500
 paper-account engine (tier 3).  This module contains the pre-screen,
-target selection, market-open wait and the global allocation lock that are
+target selection, market-open wait and the per-account allocation locks that are
 shared by both engines.
 
 TIER RULE: tier-3 builds delete ``options_*.py``, so this module must never
@@ -70,13 +70,29 @@ def _parse_alloc_timeout_seconds() -> float:
     return val
 
 
-# Serializes the post-open allocation phase of EVERY paper account, options
-# and equity, one at a time. Allocation rows never hold the scan-queue slot.
+# Allocation locks are PER PAPER ACCOUNT: every account places its trades at the
+# open in parallel, while one account can never run two allocations at once
+# (e.g. a manual "Allocate now" racing the scheduled run). Accounts share no
+# cash, positions or ledger rows, so there is nothing to serialize across them.
+# _ALLOC_LOCK is the lock for callers that pass no account id.
 #
-# Deadlock-free by construction: it is acquired at exactly ONE call site,
-# nothing inside the guarded region re-acquires it, and a thread holding
-# _ALLOC_LOCK can never block on the scan-queue slot lock.
+# Deadlock-free by construction: each lock is acquired at exactly ONE call
+# site, nothing inside the guarded region acquires another allocation lock,
+# and a thread holding one can never block on the scan-queue slot lock.
 _ALLOC_LOCK = threading.Lock()
+_ACCOUNT_ALLOC_LOCKS: dict[int, threading.Lock] = {}
+_ACCOUNT_ALLOC_LOCKS_GUARD = threading.Lock()
+
+
+def allocation_lock(account_id: int | None) -> threading.Lock:
+    """The allocation lock for ``account_id`` (``_ALLOC_LOCK`` when None)."""
+    if account_id is None:
+        return _ALLOC_LOCK
+    with _ACCOUNT_ALLOC_LOCKS_GUARD:
+        lock = _ACCOUNT_ALLOC_LOCKS.get(int(account_id))
+        if lock is None:
+            lock = _ACCOUNT_ALLOC_LOCKS[int(account_id)] = threading.Lock()
+        return lock
 _ALLOC_POLL_SECONDS = 30.0
 # Global allocation-slot hard timeout. Overridable at module load via the
 # OPTIONS_ALLOC_TIMEOUT_SECONDS environment variable; unparsable, zero, or
@@ -97,8 +113,11 @@ def _phase(label: str) -> Iterator[None]:
 
 
 @contextmanager
-def _allocation_slot(scan_id: int) -> Iterator[None]:
-    """Hold the global allocation lock for one build's post-wait phase.
+def _allocation_slot(scan_id: int, account_id: int | None = None) -> Iterator[None]:
+    """Hold ``account_id``'s allocation lock for one build's post-wait phase.
+
+    Different accounts never contend; a second allocation for the SAME account
+    waits here (status running_wait_alloc) until the first finishes.
 
     Blocks in _ALLOC_POLL_SECONDS slices rather than one open-ended
     acquire so a queued waiter (a) keeps writing updated_at and cannot
@@ -116,20 +135,21 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
     raised RuntimeError makes clear the scan never entered the allocation
     phase (it remained queued behind another build).
     """
+    lock = allocation_lock(account_id)
     waited = 0.0
-    while not _ALLOC_LOCK.acquire(timeout=_ALLOC_POLL_SECONDS):
+    while not lock.acquire(timeout=_ALLOC_POLL_SECONDS):
         waited += _ALLOC_POLL_SECONDS
         if db.is_spy_scan_cancelled(scan_id):
             raise spy_scanner.ScanCancelled()
         if waited >= _ALLOC_TIMEOUT_SECONDS:
             raise RuntimeError(
-                f"scan never acquired the allocation lock (queued behind another build); "
+                f"scan never acquired the allocation lock (queued behind another "
+                f"allocation for the same account); "
                 f"timed out after {waited:.0f}s waiting for the allocation slot")
-        # Heartbeat: this waiter now uses its own running_wait_alloc status,
-        # distinct from wait_for_market_open's running_wait_market, precisely so
-        # downstream consumers (the dashboard, /api/portfolio/status) can tell
-        # a pre-open parker apart from a build queued behind another account's
-        # allocation.
+        # Heartbeat: this waiter uses its own running_wait_alloc status,
+        # distinct from wait_for_market_open's running_wait_market, so the
+        # dashboard can tell a pre-open parker from a second allocation of the
+        # same account waiting for the first.
         db.update_spy_scan(scan_id, status="running_wait_alloc")
         log.info("[alloc %s] waiting for the allocation slot (%.0fs)", scan_id, waited)
     try:
@@ -138,7 +158,7 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
             raise spy_scanner.ScanCancelled()
         yield
     finally:
-        _ALLOC_LOCK.release()
+        lock.release()
 
 
 # ── Pre-screen ───────────────────────────────────────────────────────────────
@@ -641,12 +661,12 @@ def run_allocation(
     """Wait for today's research and the open, then call ``allocate`` once.
 
     Copies the research's quick rows and counters onto the allocation row,
-    waits for MARKET_OPEN_ET, then under the global allocation lock fetches
+    waits for MARKET_OPEN_ET, then under the account's allocation lock fetches
     live quotes for the usable deep-dived names (plus ``extra_tickers``, e.g.
     current holdings) and hands an AllocationContext to ``allocate``.
 
     Callers own completion (``complete_spy_scan``). The ~1 min of post-open
-    work runs one account at a time under the global lock. On a trading day
+    work runs under a per-account lock, so all accounts trade in parallel. On a trading day
     at or after MARKET_CLOSE_ET it raises MarketClosed (checked before the
     wait and again once the lock is held) rather than fill at post-close
     quotes.
@@ -689,10 +709,10 @@ def run_allocation(
     db.update_spy_scan(scan_id, status="running_wait_market")
     wait_for_market_open(scan_id)
 
-    # (4) allocate under the global lock
-    with _allocation_slot(scan_id):
-        # The lock can queue behind other accounts; don't let that slide the
-        # fill past the close.
+    # (4) allocate under this account's lock (accounts run in parallel)
+    with _allocation_slot(scan_id, int(pid)):
+        # The lock can queue behind this account's other allocation; don't let
+        # that slide the fill past the close.
         _refuse_after_close(market_calendar.now_et())
         db.update_spy_scan(scan_id, status="running_alloc")
         usable = [dict(r) for r in db.list_deep_dived_results(research["id"])]
@@ -783,7 +803,7 @@ def start_allocation(
     """Idempotently create and start today's allocation row for one account.
 
     Allocation rows bypass the compute queue (they are never busy until
-    running_alloc) and serialize only on _ALLOC_LOCK, so no _SCAN_LOCK is
+    running_alloc) and serialize only per account (allocation_lock), so no _SCAN_LOCK is
     taken here. Workers run in their own daemon threads via
     scan_queue.spawn_worker, because Starlette runs one request's background
     tasks sequentially.

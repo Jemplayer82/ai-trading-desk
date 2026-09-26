@@ -84,7 +84,7 @@ def env(tmp_db, monkeypatch):
         # time; asserted in the test body so a caller's try/except cannot
         # swallow the check.
         refreshes.append({"scan_id": scan_id,
-                          "locked": research_engine._ALLOC_LOCK.locked(),
+                          "locked": any(lk.locked() for lk in research_engine._ACCOUNT_ALLOC_LOCKS.values()),
                           "now": market_calendar.now_et()})
         events.append(("refresh", scan_id))
         mark = marks.get(scan_id)

@@ -1166,14 +1166,14 @@ def test_run_allocation_builds_context_and_copies_research(seeded_allocation, mo
     calls: list[tuple[Any, bool]] = []
 
     def allocate(ctx):
-        calls.append((ctx, research_engine._ALLOC_LOCK.locked()))
+        calls.append((ctx, research_engine.allocation_lock(s.pid).locked()))
 
     research_engine.run_allocation(s.sid, s.td, allocate, extra_tickers=["zzz"])
 
     assert len(calls) == 1
     ctx, locked = calls[0]
     assert locked is True
-    assert research_engine._ALLOC_LOCK.locked() is False
+    assert research_engine.allocation_lock(s.pid).locked() is False
     assert isinstance(ctx, research_engine.AllocationContext)
     assert ctx.research["id"] == s.rid
     assert [r["ticker"] for r in ctx.usable] == ["AAPL"]
@@ -1226,7 +1226,7 @@ def test_run_allocation_allocate_error_propagates_and_releases_lock(seeded_alloc
 
     with pytest.raises(ValueError, match="bad allocation"):
         research_engine.run_allocation(s.sid, s.td, allocate)
-    assert research_engine._ALLOC_LOCK.locked() is False
+    assert research_engine.allocation_lock(s.pid).locked() is False
 
 
 def test_run_allocation_after_close_refuses_before_waiting(seeded_allocation, clock):
@@ -1239,7 +1239,7 @@ def test_run_allocation_after_close_refuses_before_waiting(seeded_allocation, cl
 
     assert calls == []
     assert s.price_calls == []
-    assert research_engine._ALLOC_LOCK.locked() is False
+    assert research_engine.allocation_lock(s.pid).locked() is False
 
 
 def test_run_allocation_rechecks_close_after_lock(seeded_allocation, clock, monkeypatch):
@@ -1248,8 +1248,8 @@ def test_run_allocation_rechecks_close_after_lock(seeded_allocation, clock, monk
     real_slot = research_engine._allocation_slot
 
     @contextmanager
-    def slow_slot(scan_id):
-        with real_slot(scan_id):
+    def slow_slot(scan_id, account_id=None):
+        with real_slot(scan_id, account_id):
             clock.now = _et(2026, 9, 29, 16, 5)  # lock wait ran past the close
             yield
 
@@ -1263,7 +1263,7 @@ def test_run_allocation_rechecks_close_after_lock(seeded_allocation, clock, monk
     assert calls == []
     assert s.price_calls == []
     assert "running_alloc" not in statuses
-    assert research_engine._ALLOC_LOCK.locked() is False
+    assert research_engine.allocation_lock(s.pid).locked() is False
 
 
 def test_run_allocation_saturday_evening_forced_run_proceeds(seeded_allocation, clock):
@@ -1483,3 +1483,49 @@ def test_start_allocation_missing_runner_fails_row(start_env, monkeypatch):
     assert row["status"] == "failed"
     assert "no allocation runner" in row["error"]
     assert start_env.spawns == []
+
+
+
+def test_allocation_locks_are_per_account(monkeypatch, tmp_db):
+    """Different accounts allocate in parallel; the same account never does."""
+    monkeypatch.setattr(research_engine, "_ALLOC_POLL_SECONDS", 0.05)
+    a = db.create_spy_scan("2026-06-01", kind="options", paper_account_id=1)
+    b = db.create_spy_scan("2026-06-01", kind="equity", paper_account_id=2)
+    a2 = db.create_spy_scan("2026-06-01", kind="options", paper_account_id=1)
+
+    assert research_engine.allocation_lock(1) is research_engine.allocation_lock(1)
+    assert research_engine.allocation_lock(1) is not research_engine.allocation_lock(2)
+    assert research_engine.allocation_lock(None) is research_engine._ALLOC_LOCK
+
+    inside = threading.Event()
+    release = threading.Event()
+    seen: dict[str, Any] = {}
+
+    def hold_account_1():
+        with research_engine._allocation_slot(a, 1):
+            inside.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold_account_1)
+    t.start()
+    try:
+        assert inside.wait(5)
+        # Account 2 enters immediately while account 1 is mid-allocation.
+        with research_engine._allocation_slot(b, 2):
+            seen["b_entered_while_a_held"] = research_engine.allocation_lock(1).locked()
+
+        # A second allocation for account 1 must wait for the first.
+        def second_for_account_1():
+            with research_engine._allocation_slot(a2, 1):
+                seen["a2_entered"] = True
+
+        t2 = threading.Thread(target=second_for_account_1)
+        t2.start()
+        time_mod.sleep(0.3)
+        assert "a2_entered" not in seen
+        assert db.get_spy_scan_status(a2)["status"] == "running_wait_alloc"
+    finally:
+        release.set()
+        t.join(5)
+    t2.join(5)
+    assert seen == {"b_entered_while_a_held": True, "a2_entered": True}

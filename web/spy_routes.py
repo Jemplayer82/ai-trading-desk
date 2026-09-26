@@ -496,7 +496,7 @@ def _run_equity_allocation(scan_id: int, trade_date: str) -> None:
     """Daily equity allocation for one paper account over the shared research.
 
     research_engine.run_allocation waits for today's research and the open,
-    then (under the global allocation lock) fetches live quotes and calls
+    then (under this account's allocation lock) fetches live quotes and calls
     _allocate. The previous portfolio is marked to market first, so stops fire
     at live quotes and the rebalance starts from today's value. With no live
     quotes the row fails and the previous scan stays the latest completed one.

@@ -120,8 +120,8 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     ``WAITING_STATUSES`` rows do NOT count as busy. Per-account allocation rows
     do no compute: they wait for the shared research row
     ('running_wait_research'), then for the 09:35 ET open
-    ('running_wait_market'), then serialize on ``research_engine._ALLOC_LOCK``
-    ('running_wait_alloc' / 'running_alloc'). Only 'running_alloc' holds the
+    ('running_wait_market'), then take their account's allocation lock
+    (``research_engine.allocation_lock``; 'running_wait_alloc' / 'running_alloc'). Only 'running_alloc' holds the
     slot; the waits consume no LLM budget and no CPU, so counting them busy
     would stall queued work behind them for no reason.
 

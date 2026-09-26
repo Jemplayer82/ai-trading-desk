@@ -40,8 +40,8 @@ class SameDayCache:
     API: on a cache miss every caller fetches independently and the last
     successful `put` wins.  Holding the lock across a long-running fetch
     (for example a 30-second yfinance download) would serialise those
-    fetches and create lock-ordering hazards against
-    `research_engine._ALLOC_LOCK`.
+    fetches and create lock-ordering hazards against the per-account
+    allocation locks (`research_engine.allocation_lock`).
 
     Values are stored by reference.  Callers that mutate a cached value
     must copy it on `get` and/or `put` themselves.
