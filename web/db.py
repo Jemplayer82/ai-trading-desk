@@ -184,7 +184,8 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     aggressiveness INTEGER DEFAULT 5,
     bias TEXT DEFAULT 'neutral',
     quick_fingerprint TEXT,
-    deep_reused_count INTEGER DEFAULT 0
+    deep_reused_count INTEGER DEFAULT 0,
+    research_scan_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_spy_scans_created_at ON spy_scans (created_at DESC);
@@ -379,6 +380,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # are safe to copy (see web/spy_scanner.py _quick_scan_fingerprint).
     ("spy_scans", "quick_fingerprint", "TEXT"),
     ("spy_scans", "deep_reused_count", "INTEGER DEFAULT 0"),
+    ("spy_scans", "research_scan_id", "INTEGER"),
     # Per-account scheduled scan time and simulated stop policy.
     ("paper_accounts", "schedule_time", "TEXT"),
     ("paper_accounts", "stop_type", "TEXT NOT NULL DEFAULT 'none'"),
@@ -395,10 +397,15 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
 # schedule the user deliberately cleared, every boot, forever.
 _POST_MIGRATION_BACKFILLS: list[tuple[tuple[tuple[str, str], ...], str]] = [
     ((("paper_accounts", "schedule_time"),),
-     "UPDATE paper_accounts SET schedule_time = CASE WHEN kind = 'options' THEN '07:30' ELSE '00:00' END"),
+     "UPDATE paper_accounts SET schedule_time = '09:00'"),
     # The paired stop policy columns must backfill together or not at all.
     ((("paper_accounts", "stop_type"), ("paper_accounts", "stop_value")),
      "UPDATE paper_accounts SET stop_type = 'stop', stop_value = 60 WHERE kind = 'options'"),
+    # Shared daily research scan: every scheduled account now allocates at 09:00 ET
+    # off the shared 00:00 research; NULL means manual-only and stays NULL; it fires
+    # only on the boot where the ALTER adds the column.
+    ((("spy_scans", "research_scan_id"),),
+     "UPDATE paper_accounts SET schedule_time = '09:00' WHERE schedule_time IS NOT NULL"),
 ]
 
 
@@ -1078,6 +1085,7 @@ def latest_portfolio_scan() -> dict[str, Any] | None:
 def create_spy_scan(
     trade_date: str,
     paper_account_id: int | None = None,
+    research_scan_id: int | None = None,
     aggressiveness: int = 5,
     bias: str = "neutral",
     status: str = "pending",
@@ -1085,10 +1093,11 @@ def create_spy_scan(
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, paper_account_id, aggressiveness, bias, kind) "
-            "VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, "
+            "paper_account_id, aggressiveness, bias, kind, research_scan_id) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
             (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date,
-             status, paper_account_id, aggressiveness, bias, kind),
+             status, paper_account_id, aggressiveness, bias, kind, research_scan_id),
         )
         return int(cur.lastrowid)
 
@@ -1114,7 +1123,7 @@ def is_spy_scan_cancelled(scan_id: int) -> bool:
 _SPY_SCAN_UPDATABLE = {
     "status", "quick_count", "quick_total", "deep_count", "deep_total",
     "current_value", "last_price_check", "rebalance_notes", "error",
-    "paper_account_id", "aggressiveness", "bias",
+    "paper_account_id", "aggressiveness", "bias", "research_scan_id",
     "quick_fingerprint", "deep_reused_count",
 }
 
@@ -1221,10 +1230,10 @@ def find_stuck_portfolio_scans(stall_before_iso: str) -> list[dict[str, Any]]:
 
 
 def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
-    """Covers both equity and options runs (kind included for reaper labels)."""
+    """Covers both equity and options runs; reaper labels use kind, status and research_scan_id."""
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, trade_date, kind FROM spy_scans "
+            "SELECT id, trade_date, kind, status, research_scan_id FROM spy_scans "
             "WHERE status NOT IN ('completed', 'cancelled', 'failed', 'queued') "
             "AND COALESCE(updated_at, created_at) < ?",
             (stall_before_iso,),
@@ -1363,7 +1372,7 @@ def list_spy_scans(
         "id, created_at, trade_date, status, quick_count, quick_total,"
         " deep_count, deep_total, current_value, last_price_check,"
         " paper_account_id, aggressiveness, bias, previous_scan_id,"
-        " cancel_requested, kind"
+        " cancel_requested, kind, research_scan_id"
     )
     conditions: list[str] = ["kind = ?"]
     params: list[Any] = [kind]
@@ -1395,7 +1404,7 @@ def get_spy_scan_status(scan_id: int) -> dict[str, Any] | None:
     """
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, status, kind, quick_count, quick_total, deep_count,"
+            "SELECT id, status, kind, research_scan_id, quick_count, quick_total, deep_count,"
             " deep_total, cancel_requested, updated_at FROM spy_scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
@@ -1463,6 +1472,80 @@ def delete_all_spy_scans(kind: str = "equity") -> int:
     with connect() as conn:
         cur = conn.execute("DELETE FROM spy_scans WHERE kind = ?", (kind,))
         return cur.rowcount
+
+
+# ---------- research-scan helpers (shared daily research) ----------
+def latest_research_scan(trade_date: str, *, completed_only: bool = False) -> dict[str, Any] | None:
+    """kind='research' rows are the shared daily research, `paper_account_id` is NULL on them, and their `spy_quick_results` + `analyses` rows ARE the research."""
+    params: list[Any] = [trade_date]
+    status_filter = ""
+    if completed_only:
+        status_filter = " AND status = 'completed'"
+    with connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT id, trade_date, status, created_at, updated_at, error,
+                   quick_count, quick_total, deep_count, deep_total, deep_reused_count,
+                   quick_fingerprint, aggressiveness
+            FROM spy_scans
+            WHERE kind = 'research' AND trade_date = ?{status_filter}
+            ORDER BY id DESC LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    if not row:
+        return None
+    return dict(row)
+
+
+def count_research_attempts(trade_date: str) -> int:
+    """Count every kind='research' scan attempt for a trade date."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM spy_scans WHERE kind = 'research' AND trade_date = ?",
+            (trade_date,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def copy_spy_quick_results(src_scan_id: int, dst_scan_id: int) -> int:
+    """Copy all spy_quick_results rows from ``src_scan_id`` to ``dst_scan_id``.
+
+    The destination rows are inserted or replaced; the number of source rows
+    is returned.
+    """
+    with connect() as conn:
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM spy_quick_results WHERE scan_id = ?",
+            (src_scan_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO spy_quick_results
+                (scan_id, ticker, signal, conviction, reasoning, analysis_id, error)
+            SELECT ?, ticker, signal, conviction, reasoning, analysis_id, error
+            FROM spy_quick_results
+            WHERE scan_id = ?
+            """,
+            (dst_scan_id, src_scan_id),
+        )
+    return int(count_row["n"]) if count_row else 0
+
+
+def list_deep_dived_results(scan_id: int) -> list[dict[str, Any]]:
+    """run_deep_dives._finish upserts the deep rating and `analysis_id` onto the quick row; failed dives never touch it."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.ticker, r.signal, r.conviction, r.reasoning, r.analysis_id, a.final_decision
+            FROM spy_quick_results r
+            JOIN analyses a ON a.id = r.analysis_id
+            WHERE r.scan_id = ? AND r.error IS NULL AND a.status = 'completed'
+            ORDER BY r.conviction DESC, r.ticker
+            """,
+            (scan_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------- cross-container LLM concurrency registry ----------

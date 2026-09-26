@@ -75,8 +75,10 @@ def test_kind_migration_on_pre_kind_db(tmp_path, monkeypatch):
     with db.connect() as c:
         row = c.execute("SELECT kind FROM spy_scans WHERE id = 1").fetchone()
         assert row["kind"] == "equity"
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(paper_accounts)")}
-        assert "kind" in cols
+        pa_cols = {r["name"] for r in c.execute("PRAGMA table_info(paper_accounts)")}
+        assert "kind" in pa_cols
+        spy_cols = {r["name"] for r in c.execute("PRAGMA table_info(spy_scans)")}
+        assert "research_scan_id" in spy_cols
 
 
 # ── Kind-scoped scan queries ─────────────────────────────────────────────────

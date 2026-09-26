@@ -135,13 +135,53 @@ def test_legacy_upgrade_backfill(tmp_path, monkeypatch):
     db.init_db()
 
     rows = {r["name"]: r for r in db.list_paper_accounts()}
-    assert rows["legacy-equity"]["schedule_time"] == "00:00"
+    assert rows["legacy-equity"]["schedule_time"] == "09:00"
     assert rows["legacy-equity"]["stop_type"] == "none"
     assert rows["legacy-equity"]["stop_value"] is None
 
-    assert rows["legacy-options"]["schedule_time"] == "07:30"
+    assert rows["legacy-options"]["schedule_time"] == "09:00"
     assert rows["legacy-options"]["stop_type"] == "stop"
     assert rows["legacy-options"]["stop_value"] == 60
+
+
+def test_research_scan_id_backfill_moves_schedules_to_0900(tmp_path, monkeypatch):
+    db_path = tmp_path / "research.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+
+    db.init_db()
+
+    # Simulate a database where spy_scans predates the research_scan_id column.
+    raw = sqlite3.connect(db_path)
+    cols = [
+        r[1] for r in raw.execute("PRAGMA table_info(spy_scans)").fetchall()
+        if r[1] != "research_scan_id"
+    ]
+    raw.execute(
+        f"CREATE TABLE spy_scans_new AS SELECT {', '.join(cols)} FROM spy_scans"
+    )
+    raw.execute("DROP TABLE spy_scans")
+    raw.execute("ALTER TABLE spy_scans_new RENAME TO spy_scans")
+    raw.commit()
+    raw.close()
+
+    opt = db.create_paper_account(
+        "opt", kind="options", schedule_time="02:30",
+        stop_type="stop", stop_value=60,
+    )
+    eq = db.create_paper_account("eq", kind="equity", schedule_time="00:00")
+    manual = db.create_paper_account("manual", kind="equity")
+
+    db.init_db()
+
+    assert db.get_paper_account(opt)["schedule_time"] == "09:00"
+    assert db.get_paper_account(eq)["schedule_time"] == "09:00"
+    assert db.get_paper_account(manual)["schedule_time"] is None
+
+    # A deliberate user change is not overwritten by a second init.
+    assert db.update_paper_account(opt, schedule_time="10:15") is True
+    db.init_db()
+    db.init_db()
+    assert db.get_paper_account(opt)["schedule_time"] == "10:15"
 
 
 def test_backfill_is_one_shot(tmp_path, monkeypatch):
@@ -171,7 +211,7 @@ def test_backfill_is_one_shot(tmp_path, monkeypatch):
 
     db.init_db()
     row = db.get_paper_account(1)
-    assert row["schedule_time"] == "07:30"
+    assert row["schedule_time"] == "09:00"
 
     # Clear the schedule manually
     assert db.update_paper_account(1, schedule_time=None) is True
