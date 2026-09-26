@@ -210,6 +210,20 @@ _BIAS_CONTEXT = {
     "neutral": "",
 }
 
+_DAILY_REBALANCE_ADDENDUM = (
+    "\nDAILY CADENCE (overrides the weekly framing above): This is a DAILY check-in "
+    "against a fresh research pass, not a weekly rebalance. Default every existing "
+    "position to HOLD at its current size. EXIT only on a SELL/Underweight rating or "
+    "a conviction collapse; open NEW positions only for BUY/Overweight candidates with "
+    "conviction ≥ 8; never ADD/TRIM merely to re-weight. Holdings marked 'not re-rated "
+    "today' have NO new signal — HOLD them. Turnover is a cost.\n"
+)
+
+CADENCES = ("weekly", "daily")
+_BUY_SIGNALS = ("BUY", "OVERWEIGHT")
+_SELL_SIGNALS = ("SELL", "UNDERWEIGHT")
+_DAILY_NEW_MIN_CONVICTION = 8
+
 
 def _position_limits(aggressiveness: int, capital: float) -> tuple[float, int, int]:
     """Return (max_position_dollars, max_pct, min_cash_pct) from aggressiveness 1–10."""
@@ -252,12 +266,17 @@ def build_rebalance_user_message(
     previous_portfolio: list[dict[str, Any]] | None,
     trade_date: str,
     capital: float,
+    cadence: str = "weekly",
 ) -> str:
     """Build the rebalance user message exactly as the legacy inline code did.
 
     Adds a STOPPED OUT section for mid-week stop exits so the LLM knows those
     tickers were already closed by this account's stop policy and are not
     current holdings.
+
+    With ``cadence="daily"`` a holding missing from ``candidates`` was simply
+    not re-rated by today's research pass, so it renders as HOLD (keeping its
+    previous conviction) instead of the weekly "dropped out → SELL" framing.
     """
     live_prev = live_positions(previous_portfolio)
     prev_map = {p["ticker"]: p for p in live_prev}
@@ -277,6 +296,10 @@ def build_rebalance_user_message(
             sig = (cand.get("signal") or "—").upper()
             conv = cand.get("conviction") or 0
             excerpt = (cand.get("final_decision") or cand.get("reasoning") or "")[:200]
+        elif cadence == "daily":
+            sig = "HOLD"
+            conv = int(prev.get("conviction") or 0)
+            excerpt = "Not re-rated in today's research — no new signal; default HOLD."
         else:
             sig = "SELL"
             conv = 0
@@ -323,7 +346,7 @@ def _llm(config: dict[str, Any]):
 
 def _fallback_fresh(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Equal-weight the BUYs (or top 20 by conviction if none) across $100k."""
-    buys = [c for c in candidates if (c.get("signal") or "").upper() == "BUY"]
+    buys = [c for c in candidates if (c.get("signal") or "").upper() in _BUY_SIGNALS]
     if not buys:
         buys = sorted(candidates, key=lambda c: -(c.get("conviction") or 0))[:20]
     total = 100_000
@@ -353,7 +376,7 @@ def _fallback_rebalance(
     prev_map = {p["ticker"]: p for p in live_prev}
     result: list[dict[str, Any]] = []
 
-    buys = [c for c in candidates if (c.get("signal") or "").upper() == "BUY"]
+    buys = [c for c in candidates if (c.get("signal") or "").upper() in _BUY_SIGNALS]
     if not buys:
         buys = sorted(candidates, key=lambda c: -(c.get("conviction") or 0))[:20]
 
@@ -391,6 +414,79 @@ def _fallback_rebalance(
     return result
 
 
+def _fallback_daily(
+    candidates: list[dict[str, Any]],
+    previous_portfolio: list[dict[str, Any]],
+    capital: float,
+) -> list[dict[str, Any]]:
+    """Low-churn daily fallback: hold everything, act only on new signals.
+
+    Live holdings are kept as HOLD at their previous size unless today's
+    research rates them SELL/Underweight (→ EXITED). Non-held BUY/Overweight
+    candidates with conviction ≥ 8 split the free cash (capital minus the
+    held dollars) equally, highest conviction first.
+    """
+    cand_map = {c["ticker"]: c for c in candidates}
+    live_prev = live_positions(previous_portfolio)
+    held_tickers = {p["ticker"] for p in live_prev}
+    result: list[dict[str, Any]] = []
+
+    for prev in live_prev:
+        cand = cand_map.get(prev["ticker"])
+        signal = ((cand or {}).get("signal") or "").upper()
+        if signal in _SELL_SIGNALS:
+            result.append({
+                "ticker": prev["ticker"],
+                "action": "EXITED",
+                "allocation_pct": 0,
+                "dollar_amount": 0,
+                "entry_price": prev.get("entry_price", 0),
+                "rationale": f"Fallback: daily exit on {signal} rating.",
+            })
+            continue
+        row = {
+            "ticker": prev["ticker"],
+            "action": "HOLD",
+            "allocation_pct": prev.get("allocation_pct", 0),
+            "dollar_amount": prev.get("dollar_amount", 0),
+            "entry_price": prev.get("entry_price", 0),
+            "rationale": "Fallback: daily hold (no actionable signal change).",
+        }
+        for key in ("shares", "cost_basis"):
+            if key in prev:
+                row[key] = prev[key]
+        result.append(row)
+
+    held_dollars = sum(
+        float(r.get("dollar_amount") or 0) for r in result if r["action"] == "HOLD"
+    )
+    free_cash = capital - held_dollars
+
+    buys = sorted(
+        (
+            c for c in candidates
+            if c["ticker"] not in held_tickers
+            and (c.get("signal") or "").upper() in _BUY_SIGNALS
+            and (c.get("conviction") or 0) >= _DAILY_NEW_MIN_CONVICTION
+        ),
+        key=lambda c: -(c.get("conviction") or 0),
+    )
+    if buys and free_cash > 0:
+        per = round(free_cash / len(buys), 2)
+        alloc_pct = round(per / capital * 100, 2) if capital else 0
+        for c in buys:
+            result.append({
+                "ticker": c["ticker"],
+                "action": "NEW",
+                "allocation_pct": alloc_pct,
+                "dollar_amount": per,
+                "entry_price": c.get("entry_price", 0),
+                "rationale": f"Fallback: daily new position (conviction {c.get('conviction','?')}/10).",
+            })
+
+    return result
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def run(
@@ -401,6 +497,7 @@ def run(
     starting_value: float | None = None,
     aggressiveness: int = 5,
     bias: str = "neutral",
+    cadence: str = "weekly",
 ) -> dict[str, Any]:
     """Return {allocations, total, cash, report_md, starting_value}.
 
@@ -408,8 +505,20 @@ def run(
     otherwise allocates a fresh portfolio (week 1). aggressiveness (1–10)
     controls position sizing limits; bias (bullish/neutral/bearish) shifts
     the LLM prompt toward more or less aggressive stance.
+
+    cadence is "weekly" (default, legacy behaviour byte-for-byte) or "daily".
+    A daily rebalance appends a low-churn addendum to the system prompt,
+    renders holdings absent from today's research as HOLD rather than SELL,
+    falls back to _fallback_daily (hold unless SELL/Underweight; open only
+    conviction ≥ 8 BUY/Overweight names), and titles the report "Daily
+    allocation". A daily run with live holdings but no candidates still goes
+    through the LLM/fallback so the holdings are kept, not wiped. Fresh mode is
+    identical for both cadences. Any other cadence raises ValueError.
     """
-    if not candidates:
+    if cadence not in CADENCES:
+        raise ValueError(f"cadence must be one of {CADENCES}, got {cadence!r}")
+
+    if not candidates and (cadence == "weekly" or not live_positions(previous_portfolio)):
         return {"allocations": [], "total": 0, "report_md": "No candidates provided.",
                 "starting_value": starting_value or 100_000}
 
@@ -437,12 +546,17 @@ def run(
         fallback_fn = lambda: _fallback_fresh(candidates)
     else:
         user_msg = build_rebalance_user_message(
-            candidates, previous_portfolio, trade_date, capital
+            candidates, previous_portfolio, trade_date, capital, cadence=cadence
         )
         system = _REBALANCE_SYSTEM_TEMPLATE.format(
             max_pct=max_pct, min_cash_pct=min_cash_pct, bias_context=bias_context,
         )
-        fallback_fn = lambda: _fallback_rebalance(candidates, previous_portfolio or [], capital)
+        if cadence == "daily":
+            system += _DAILY_REBALANCE_ADDENDUM
+        if cadence == "daily" and live_positions(previous_portfolio):
+            fallback_fn = lambda: _fallback_daily(candidates, previous_portfolio or [], capital)
+        else:
+            fallback_fn = lambda: _fallback_rebalance(candidates, previous_portfolio or [], capital)
 
     # ── Call the LLM ─────────────────────────────────────────────────────────
     llm = _llm({**DEFAULT_CONFIG, **config})
@@ -492,7 +606,10 @@ def run(
     cash_pct = (cash / capital * 100) if capital else 0.0
 
     # ── Build markdown report ─────────────────────────────────────────────────
-    mode_label = "Rebalance" if is_rebalance else "Initial Portfolio"
+    if is_rebalance and cadence == "daily":
+        mode_label = "Daily allocation"
+    else:
+        mode_label = "Rebalance" if is_rebalance else "Initial Portfolio"
     bias_label = bias.capitalize() if bias != "neutral" else "Neutral"
     lines = [
         f"# S&P 500 Paper Portfolio — {trade_date} ({mode_label})",
