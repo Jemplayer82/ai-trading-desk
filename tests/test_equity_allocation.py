@@ -230,6 +230,46 @@ def test_trading_day_marks_previous_portfolio_only_after_the_open(env, monkeypat
     assert db.get_spy_scan(sid)["status"] == "completed"
 
 
+def test_held_only_day_prices_holdings_without_usable_dives(env, monkeypatch):
+    """Quiet day: research has no deep dives, but the account holds BBB.
+
+    The held names must still be quoted (extra_tickers), or the allocation
+    would fail with "no live quotes" on every all-HOLD day.
+    """
+    # A newer completed research row for TD with quick rows only: no dives.
+    quiet = db.create_spy_scan(TD, kind="research")
+    for ticker in ("AAA", "CCC"):
+        db.upsert_spy_quick_result(quiet, ticker, signal="Hold", conviction=3, reasoning="r")
+    db.update_spy_scan(quiet, deep_total=0, deep_count=0)
+    db.complete_spy_scan(quiet, "research", [])
+    assert db.list_deep_dived_results(quiet) == []
+    prev = _prev_scan(env["acct"])
+
+    requested: list[list[str]] = []
+    quotes = {"AAA": 50.0, "BBB": 20.0, "CCC": 30.0}
+
+    def recording_fetch(tickers, **_kwargs):
+        requested.append([t.upper() for t in tickers])
+        return {t.upper(): quotes[t.upper()] for t in tickers if t.upper() in quotes}
+
+    monkeypatch.setattr(spy_scanner, "fetch_live_prices", recording_fetch)
+
+    spy_routes._run_equity_allocation(env["sid"], TD)
+
+    assert requested == [["BBB"]], "held names must be quoted even with no usable dives"
+    assert len(env["run_calls"]) == 1
+    call = env["run_calls"][0]
+    assert call["cadence"] == "daily"
+    assert call["candidates"] == []
+    assert [p["ticker"] for p in call["previous_portfolio"]] == ["BBB"]
+    assert call["previous_portfolio"][0]["shares"] == 5
+
+    row = db.get_spy_scan(env["sid"])
+    assert row["status"] == "completed", row.get("error")
+    assert row["research_scan_id"] == quiet
+    assert row["previous_scan_id"] == prev
+
+
 def test_no_live_quotes_fails_and_keeps_previous_portfolio(env, monkeypatch):
     prev = _prev_scan(env["acct"])
     monkeypatch.setattr(spy_scanner, "fetch_live_prices", lambda t, **k: {})
