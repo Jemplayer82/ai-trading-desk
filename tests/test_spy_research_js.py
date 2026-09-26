@@ -2,7 +2,8 @@
 
 These tests exercise ``loadResearchTime()`` / ``saveResearchTime()``,
 ``loadResearchStatus()`` / ``runResearchNow()`` and the Allocate-now gating in
-``triggerSpyScan()`` from ``web/static/spy.js`` using the Node.js vm harness in
+``triggerSpyScan()`` from ``web/static/spy.js`` (plus the matching
+``triggerOptionsScan()`` in ``web/static/options.js``) using the Node.js vm harness in
 ``tests/jsvm.py``.
 """
 
@@ -48,13 +49,27 @@ globalThis.fetch = function (url, options) {
     if (url === "/api/research-scan") {
         return __ok(globalThis.__researchPostResponse);
     }
+    if (url === "/api/spy-scan" && globalThis.__scanPostResponse) {
+        const resp = globalThis.__scanPostResponse;
+        return Promise.resolve({
+            ok: resp.ok,
+            status: resp.status,
+            json: function () { return Promise.resolve(resp.body); }
+        });
+    }
     return __ok({accounts: [], scans: []});
 };
 """
 
+OPTIONS_BOOTSTRAP = BOOTSTRAP.replace('url === "/api/spy-scan"', 'url === "/api/options-scan"')
+
 
 def _run(script):
     return run_js(sources=["utils.js", "spy.js"], bootstrap=BOOTSTRAP, script=script)
+
+
+def _run_options(script):
+    return run_js(sources=["utils.js", "options.js"], bootstrap=OPTIONS_BOOTSTRAP, script=script)
 
 
 def test_load_research_time_sets_saved_value():
@@ -201,3 +216,100 @@ def test_trigger_spy_scan_without_account_makes_no_fetch():
     )
     assert result["calls"] == 0
     assert result["status"].startswith("Select or create an S&P paper account first")
+
+
+NOT_TRADING_DETAIL = "2026-09-26 is not an NYSE trading day — allocation not queued"
+
+# (runner, account global, POST url, status element id, "existing" wording)
+TRIGGERS = {
+    "spy": (_run, "activePaperAccountId", "/api/spy-scan", "spy-scan-status", "already running"),
+    "options": (
+        _run_options, "activeOptAccountId", "/api/options-scan", "options-scan-status", "already exists today"
+    ),
+}
+
+
+def _trigger(kind, response):
+    runner, account_var, post_url, status_id, _ = TRIGGERS[kind]
+    fn = "triggerSpyScan" if kind == "spy" else "triggerOptionsScan"
+    # The scan viewer render needs a real DOM; record which scan would open.
+    loader = "loadSpyScan" if kind == "spy" else "loadOptionsScan"
+    return runner(
+        "globalThis.__scanPostResponse = " + json.dumps(response) + ";\n"
+        "globalThis.__opened = [];\n"
+        + loader + " = function (id) { __opened.push(id); };\n"
+        "return (async () => {\n"
+        "    " + account_var + " = 5;\n"
+        "    await " + fn + "();\n"
+        "    const posts = __calls.filter((c) => c.url === " + json.dumps(post_url) + ");\n"
+        "    const post = posts[0];\n"
+        "    return {\n"
+        "        posts: posts.length,\n"
+        "        method: post && post.options ? post.options.method : null,\n"
+        "        body: post && post.options && post.options.body ? JSON.parse(post.options.body) : null,\n"
+        "        status: document.getElementById(" + json.dumps(status_id) + ").textContent,\n"
+        "        urls: __calls.map((c) => c.url),\n"
+        "        opened: __opened,\n"
+        "    };\n"
+        "})();"
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+def test_allocate_now_409_shows_route_detail(kind):
+    result = _trigger(kind, {"ok": False, "status": 409, "body": {"detail": NOT_TRADING_DETAIL}})
+    assert result["posts"] == 1
+    assert result["method"] == "POST"
+    assert result["body"] == {"account_id": 5}
+    assert result["status"] == NOT_TRADING_DETAIL
+    # The error path returns before refreshing history or opening a scan.
+    assert result["urls"] == [TRIGGERS[kind][2]]
+    assert result["opened"] == []
+
+
+@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+def test_allocate_now_non_ok_without_detail_shows_http_status(kind):
+    result = _trigger(kind, {"ok": False, "status": 500, "body": {}})
+    assert result["body"] == {"account_id": 5}
+    assert result["status"].startswith("Error")
+    assert "500" in result["status"]
+
+
+@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+def test_allocate_now_new_allocation_reports_queued(kind):
+    result = _trigger(
+        kind, {"ok": True, "status": 200, "body": {"scan_id": 41, "status": "pending", "new": True}}
+    )
+    assert result["posts"] == 1
+    assert result["method"] == "POST"
+    assert result["body"] == {"account_id": 5}
+    assert result["status"] == (
+        "Allocation #41 queued — waits for today's research and the 09:35 ET open"
+    )
+    assert result["opened"] == [41]
+
+
+@pytest.mark.parametrize("kind", sorted(TRIGGERS))
+def test_allocate_now_existing_allocation_is_not_labelled_queued(kind):
+    existing = TRIGGERS[kind][4]
+    result = _trigger(
+        kind, {"ok": True, "status": 200, "body": {"scan_id": 41, "status": "running", "new": False}}
+    )
+    assert result["body"] == {"account_id": 5}
+    assert result["status"] == "Allocation #41 " + existing
+    assert "queued" not in result["status"]
+
+
+def test_trigger_options_scan_without_account_makes_no_fetch():
+    result = _run_options(
+        "return (async () => {\n"
+        "    activeOptAccountId = null;\n"
+        "    await triggerOptionsScan();\n"
+        "    return {\n"
+        "        calls: __calls.length,\n"
+        "        status: document.getElementById('options-scan-status').textContent,\n"
+        "    };\n"
+        "})();"
+    )
+    assert result["calls"] == 0
+    assert result["status"].startswith("Create an options paper account first")
