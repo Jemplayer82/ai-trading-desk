@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-DEFAULT_TIER = 4
+DEFAULT_TIER = 3
 
 _TIER_FEATURES: dict[int, frozenset[str]] = {
     1: frozenset(),

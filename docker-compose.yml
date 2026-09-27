@@ -26,7 +26,7 @@ services:
     pull_policy: always
     entrypoint: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      TIER: ${TIER:-4}
+      TIER: ${TIER:-3}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
@@ -67,7 +67,7 @@ services:
     entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
     mem_limit: 4g
     environment:
-      TIER: ${TIER:-4}
+      TIER: ${TIER:-3}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
       # Deep-dive LLM-call concurrency budget (web/spy_scanner.py _total_budget()).
@@ -115,7 +115,7 @@ services:
     pull_policy: always
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
-      TIER: ${TIER:-4}
+      TIER: ${TIER:-3}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}

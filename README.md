@@ -21,8 +21,8 @@
 > For research and educational purposes only. Trading performance varies with the chosen models, data quality, and market conditions. This is not financial, investment, or trading advice.
 
 <!-- TIER-IDENTITY BEGIN -->
-> **This branch: `master` — Tier 4 — Full: + daily options paper trading (the complete product).**
-> Development happens here. The reduced tiers are published as generated branches — see the tier table below.
+> **This branch: `tier-3-scanner` — Tier 3 — Scanner: + the daily S&P 500 research and paper portfolio.**
+> **GENERATED BRANCH — do not commit here.** Regenerated from `master` by `scripts/make_tier.py` (driven by `.github/workflows/tiers.yml`); the next regeneration force-pushes over this branch and your commit is gone. Develop on `master`.
 <!-- TIER-IDENTITY END -->
 
 ---
@@ -58,9 +58,6 @@ Connect a Schwab account to scan a live portfolio, with a nightly sweep of every
 <!-- TIER:3 BEGIN -->
 Let the scheduler research the S&P 500 every trading day (a shared 00:00 ET pass), deep-dive the highest-conviction names, and rebalance a $100k paper portfolio on its own after the open.
 <!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-Turn on the daily options paper trader, which hunts S&P 500 movers every weekday and trades long calls and puts under hard risk guardrails, grading its own closed trades to learn from them.
-<!-- TIER:4 END -->
 
 The project ships as container images and deploys as a Portainer edge stack, backed by FastAPI services and a SQLite database. The repository is **self-contained** — the underlying TradingAgents agent framework is vendored in directly, so everything needed to build and run the dashboard lives in this repo with no dependency on the upstream project.
 
@@ -96,9 +93,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
   <!-- TIER:3 BEGIN -->
   - **S&P 500** — the daily market-wide research and paper portfolio
   <!-- TIER:3 END -->
-  <!-- TIER:4 BEGIN -->
-  - **Options** — the daily options paper trader
-  <!-- TIER:4 END -->
   - **Settings** — provider keys, app settings, and users
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
@@ -115,9 +109,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 <!-- TIER:3 BEGIN -->
 - Shared daily S&P 500 research at 00:00 ET (pre-screen all ~500 tickers, quick scan top 150 + SPY, deep-dive top 50 + SPY) feeding a daily $100k paper portfolio allocation
 <!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-- Daily options paper trader (pre-screen the whole S&P 500 → quick scan top 150 + SPY → deep-dive top 50 directional + SPY → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
-<!-- TIER:4 END -->
 
 **Provider & Credential Management**
 - Ollama Cloud as the deployed default backend, with 14+ LLM providers supported (OpenAI, Anthropic, Google, xAI, DeepSeek, Qwen, GLM, MiniMax, OpenRouter, Azure, Ollama, Mistral, custom)
@@ -257,9 +248,6 @@ Single-ticker deep analysis with real-time streaming:
 <!-- TIER:3 BEGIN -->
 > **Sizing.** In the equity paper portfolio, aggressiveness also drives position sizing: ≤3 → max 7% per position / 20% cash · 4–7 → 12% / 10% · 8–10 → 20% / 5%.
 <!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-> **Options sizing.** For options paper accounts: ≤3 → max 5% premium per position / 15% total at risk · 4–7 → 8% / 30% · 8–10 → 12% / 50%.
-<!-- TIER:4 END -->
 
 <!-- TIER:2 BEGIN -->
 ### Schwab Tab
@@ -295,23 +283,6 @@ Daily paper portfolio built from one shared research pass per NYSE trading day:
 Each account's allocation time is configurable in the account modal, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking. Hourly price refreshes also enforce that account's configured stop policy (none / stop / stop-limit / trailing % / trailing $) against its paper positions, booking a simulated exit into the snapshot with its realized P&L — simulated only, the app never places a real order.
 <!-- TIER:3 END -->
 
-<!-- TIER:4 BEGIN -->
-### Options Tab
-
-Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every trading day:
-
-- **Shared research (00:00 ET)** — one research pass per trading day, shared with the S&P tab: momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
-- **Per-account allocation time (default 09:00 ET)** — each account allocates from that day's research at its own configurable time
-- **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
-- **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
-- **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 unconditionally, while the stop is now the account's configured policy (none / stop / stop-limit / trailing % / trailing $), backfilled to a 60% stop for existing options accounts, per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
-- **Hourly marks** (10:00–16:00 + 16:45 ET) enforce the account's own stop policy intraday like standing orders, booked at the minute the level was crossed: a level crossed during the interval fills **at** the level, a gap straight through fills at the observed quote, and a **stop-limit** that gaps below its limit price rests until a later refresh quotes back at or above it. Stale/carried marks never trigger, and `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false` disables the whole intraday pass regardless of any account's policy. A **20:00 ET expiry settlement** sweep models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
-- **20:15 ET learning pass** — deep-dive directional calls are graded nightly against the underlying's forward alpha (the shared memory log), and every closed position gets a directional-vs-decay P&L attribution; once enough closes accumulate, a nightly batch reflection distills "watch for …" lessons that are injected into the next allocator run as context (hard risk limits are never relaxed by lessons)
-
-Unlike the S&P tab's daily snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
-
-The tab also has an on-demand **Ticker Recommendation** box: type any ticker and get a specific contract pick with confidence (1–10), entry/target/stop premiums, horizon, thesis and risks. It runs the same momentum quick-read and contract-vetting pipeline as the daily scan, vets **both** the call and the put, and the advisor is briefed with the system's graded decision history and its own options lessons — every recommendation is itself stored and graded by the nightly learning sweep. Advisory only; nothing is traded.
-<!-- TIER:4 END -->
 
 ### Credentials Tab
 
@@ -596,9 +567,6 @@ Every FastAPI and CLI role shares **one image** (`tradingagents`) with different
 <!-- TIER:3 BEGIN -->
 - **S&P 500 Scans** — multi-phase SPX analysis with portfolio allocations
 <!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-- **Options Positions & Ledger** — per-contract paper positions, cash ledger, and graded lessons
-<!-- TIER:4 END -->
 
 ---
 
@@ -638,12 +606,6 @@ NEWSLETTER_FROM=...
 NEWSLETTER_TO=...
 
 # TIER:2 END
-# TIER:4 BEGIN
-# Options learning loop (optional overrides; sensible defaults built in)
-TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS=true   # kill switch: scan deep dives feeding the memory log
-TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED=10    # min closed positions before stats reach the allocator
-TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED=5 # min NEW closes before a nightly reflection fires
-# TIER:4 END
 ```
 
 > [!IMPORTANT]
@@ -695,10 +657,6 @@ ai-trading-desk/
 │   ├── spy_allocator.py    # $100k portfolio builder
 │   ├── research_engine.py  # shared daily S&P 500 research
 # TIER:3 END
-# TIER:4 BEGIN
-│   ├── options_engine.py   # per-account options allocation
-│   ├── options_learning.py # closed-trade grading + lessons
-# TIER:4 END
 │   ├── bus.py              # Switchboard MCP client + resilient publisher
 │   ├── bus_mirror.py       # Mirror agent handoffs onto the Agent Bus
 │   └── static/             # SPA files (served by nginx)
@@ -711,9 +669,6 @@ ai-trading-desk/
 # TIER:3 BEGIN
 │       ├── spy.js
 # TIER:3 END
-# TIER:4 BEGIN
-│       ├── options.js
-# TIER:4 END
 │       ├── credentials.js
 │       └── styles.css
 ├── scripts/make_tier.py    # generates the tier branches from master
