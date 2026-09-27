@@ -373,6 +373,7 @@ The `switchboard` container starts automatically, `tradingagents-web` connects t
 | `BUS_MIRROR` | No | `analysis` | Set to `off` to disable all bus publishing without stopping the switchboard container |
 | `SWITCHBOARD_URL` | Auto | `http://switchboard:3107` | Resolved by compose — only override if running the switchboard outside the stack |
 | `SWITCHBOARD_TARGET_AGENT` | No | `llm-router` | Bus agent that answers LLM requests when `LLM_PROVIDER=switchboard` — `llm-router` (built-in → Ollama/OpenAI) or `cleo` (external Claude CLI daemon) |
+| `SWITCHBOARD_CHATGPT_AGENT` | No | `codex` | Bus agent that answers the ChatGPT models (`chatgpt:astra` etc.) — the Codex daemon below. Routing is per model, so one analysis can mix Claude and ChatGPT roles |
 
 The bus is also published on **host port `3109`** (`docker-compose.yml`) so off-stack agents can connect at `http://<host>:3109/mcp`.
 
@@ -414,8 +415,8 @@ journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 #    Switchboard — LLM handler agent:   cleo
 #    (leave "backend provider" blank — Cleo ignores it)
 
-# 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a Claude model
-#    (e.g. claude-sonnet-5 or claude-opus-5) then run as normal.
+# 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a model
+#    (Sonnet, Opus or Fable) then run as normal.
 ```
 
 > 📋 **Cleo env knobs** (set in `/etc/cleo/cleo.env` or as shell env vars):
@@ -425,11 +426,11 @@ journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 > | `SWITCHBOARD_URL` | — | Switchboard base URL, no trailing `/mcp` (e.g. `http://host:3109`) |
 > | `SWITCHBOARD_MCP_TOKEN` | — | Bearer token — must match `SWITCHBOARD_MCP_TOKEN` in the stack |
 > | `SWITCHBOARD_AGENT_ID` | `cleo` | Bus agent name to register as |
-> | `DEFAULT_MODEL` | `claude-sonnet-5` | Fallback model when the request doesn't specify one |
+> | `DEFAULT_MODEL` | `sonnet` | Fallback model when the request doesn't specify one |
 > | `CLEO_CALL_TIMEOUT_S` | `150` | Hard per-call deadline in seconds — keep below the client's 180s so Cleo fails itself first |
 > | `CLAUDE_BIN` | `claude` | Full path to the `claude` binary if it isn't on `PATH` for the service user |
 
-The daemon handles up to 8 concurrent requests so back-to-back analyst calls during a scan don't block each other. A single-instance flock guard prevents a second accidental copy from splitting the request stream. Updating Cleo is a pull + restart: `git pull && sudo systemctl restart cleo`.
+The daemon handles up to 8 concurrent requests so back-to-back analyst calls during a scan don't block each other. Each `claude -p` call skips the host user's interactive setup (settings, hooks, plugins, skills and auto-memory via `--setting-sources "" --disable-slash-commands`), keeping effort at `high`: about 460 fixed tokens per call instead of ~3,400, and none of your personal hooks fire for background work. A single-instance flock guard prevents a second accidental copy from splitting the request stream. Updating Cleo is a pull + restart: `git pull && sudo systemctl restart cleo`.
 
 > ⚠️ **Why Claude Haiku isn't offered as a Switchboard model.** The `claude` CLI
 > has no way to accept a real tool schema over this path, so Cleo teaches the
@@ -442,6 +443,39 @@ The daemon handles up to 8 concurrent requests so back-to-back analyst calls dur
 > different code path); it's excluded only from the free Switchboard/Cleo
 > route. See the `switchboard` catalog entry in
 > `tradingagents/llm_clients/model_catalog.py` for the technical detail.
+
+#### Model menus: always the latest
+
+The Switchboard dropdowns list model **families**, never pinned versions, so the
+desk moves to each new release on its own:
+
+| Entry | Handler | Resolves to (2026-09-27) |
+|---|---|---|
+| Sonnet / Opus / Fable (deep only) | Cleo | `claude-sonnet-5` / `claude-opus-5-5` / `claude-fable-5-1` via the CLI's family aliases |
+| ChatGPT Astra / Sol / Luna / Terra | Codex | `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-terra`, the newest listed model per family |
+
+To pin a specific version, type its ID into **Custom model ID** (a Claude ID, or
+`chatgpt:<model-id>` for ChatGPT).
+
+### Connecting ChatGPT (Codex daemon)
+
+`scripts/codex_llm_handler.py` is Cleo's ChatGPT twin. It registers as `codex`
+and answers the ChatGPT entries by running `codex exec` on the host's
+**Sign in with ChatGPT** session, so usage counts against your ChatGPT plan: no
+OpenAI API key and no per-token billing. It reuses Cleo's bus and tool-marker
+protocol; tool calls work on every family.
+
+Codex is a coding agent, so every call is locked down: shell, exec, browser,
+computer use, apps and plugins are disabled, the sandbox is read-only, and it
+runs in an empty temporary folder. Codex's own instructions are replaced by a
+one-line file, which brings the fixed overhead down to about 5,600 tokens per
+call. Replies arrive in one piece rather than streamed.
+
+```bash
+sudo npm install -g @openai/codex && codex login --device-auth
+codex exec "Reply OK"                     # must print OK
+# then follow deploy/codex/README.md (service unit + env file, agent id "codex")
+```
 
 #### Streaming protocol
 
