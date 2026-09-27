@@ -133,7 +133,8 @@ CREATE TABLE IF NOT EXISTS analyses (
     full_state TEXT,
     error TEXT,
     config_fingerprint TEXT,
-    reused_from_analysis_id INTEGER
+    reused_from_analysis_id INTEGER,
+    completed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses (created_at DESC);
@@ -376,6 +377,10 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # donor analysis a row's portfolio-manager rerun was based on.
     ("analyses", "config_fingerprint", "TEXT"),
     ("analyses", "reused_from_analysis_id", "INTEGER"),
+    # When complete_analysis ran (UTC, same format as created_at). created_at is
+    # stamped at INSERT, before the model runs, so research needs this to know
+    # whether a call existed before a given market open. NULL on older rows.
+    ("analyses", "completed_at", "TEXT"),
     # Quick-scan reuse: fingerprint the LLM-relevant quick-scan config so a
     # later same-day scan can tell whether this scan's spy_quick_results rows
     # are safe to copy (see web/spy_scanner.py _quick_scan_fingerprint).
@@ -786,6 +791,7 @@ def complete_analysis(analysis_id: int, final_state: dict[str, Any], processed_s
             """
             UPDATE analyses SET
                 status = 'completed',
+                completed_at = ?,
                 final_decision = ?,
                 processed_signal = ?,
                 market_report = ?,
@@ -799,6 +805,7 @@ def complete_analysis(analysis_id: int, final_state: dict[str, Any], processed_s
             WHERE id = ?
             """,
             (
+                datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 _get("final_trade_decision"),
                 processed_signal,
                 _get("market_report"),
