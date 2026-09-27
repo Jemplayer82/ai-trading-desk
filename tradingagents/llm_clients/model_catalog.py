@@ -227,12 +227,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # web/runner.py::_catalog_default takes the first non-"custom" entry.
     # To pin a specific snapshot anyway, type its ID into "Custom model ID".
     #
-    # "chatgpt" is answered by a different bus agent: the Codex handler
-    # (scripts/codex_llm_handler.py, agent id SWITCHBOARD_CHATGPT_AGENT, default
-    # "codex"), which runs `codex exec` on the host's ChatGPT sign-in. It means
-    # the Codex CLI's current default model, i.e. always the latest; pin one
-    # with Custom model ID "chatgpt:<model-id>". Routing is per model, so the
-    # quick and deep roles can use different handlers.
+    # "chatgpt:<family>" entries are answered by a different bus agent: the
+    # Codex handler (scripts/codex_llm_handler.py, agent id
+    # SWITCHBOARD_CHATGPT_AGENT, default "codex"), which runs `codex exec` on the
+    # host's ChatGPT sign-in. Each family (Astra frontier, Sol workhorse, Luna
+    # fast, Terra balanced) resolves at call time to its newest model, so these
+    # never pin a version (2026-09-27: gpt-6-astra, gpt-6-sol, gpt-6-luna,
+    # gpt-5.6-terra). Pin one with Custom model ID "chatgpt:<model-id>". Routing
+    # is per model, so the quick and deep roles can use different handlers.
     #
     # The tradeoff: an always-latest name means the model under your analysis
     # changes the day Anthropic ships the next one, with no commit and no
@@ -299,7 +301,10 @@ MODEL_OPTIONS: ProviderModeOptions = {
         "quick": [
             ("Sonnet — latest (via bus)", "sonnet"),
             ("Opus — latest, slower (via bus)", "opus"),
-            ("ChatGPT — latest (via bus, Codex handler)", "chatgpt"),
+            ("ChatGPT Sol — latest, workhorse (via bus, ChatGPT plan)", "chatgpt:sol"),
+            ("ChatGPT Luna — latest, fast (via bus, ChatGPT plan)", "chatgpt:luna"),
+            ("ChatGPT Terra — latest, balanced (via bus, ChatGPT plan)", "chatgpt:terra"),
+            ("ChatGPT Astra — latest, frontier (via bus, ChatGPT plan)", "chatgpt:astra"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
         ],
@@ -307,7 +312,10 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Opus — latest (via bus)", "opus"),
             ("Fable — latest, most capable, slowest (via bus)", "fable"),
             ("Sonnet — latest, faster (via bus)", "sonnet"),
-            ("ChatGPT — latest (via bus, Codex handler)", "chatgpt"),
+            ("ChatGPT Astra — latest, frontier (via bus, ChatGPT plan)", "chatgpt:astra"),
+            ("ChatGPT Sol — latest, workhorse (via bus, ChatGPT plan)", "chatgpt:sol"),
+            ("ChatGPT Terra — latest, balanced (via bus, ChatGPT plan)", "chatgpt:terra"),
+            ("ChatGPT Luna — latest, fast (via bus, ChatGPT plan)", "chatgpt:luna"),
             ("Custom model ID", "custom"),
         ],
     },

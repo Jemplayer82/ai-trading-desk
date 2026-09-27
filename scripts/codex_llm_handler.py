@@ -23,9 +23,10 @@ so only the model call differs:
 * ``codex exec --json`` emits the reply only when the turn completes, so a
   reply is streamed back to the desk as a single chunk.
 
-Model names: the desk sends ``chatgpt`` for "the latest model" — the CLI's
-built-in default, which OpenAI moves forward. ``chatgpt:<model-id>`` pins one
-(Custom model ID in the dashboard). Anything else is passed through to -m.
+Model names: ``chatgpt:astra|sol|luna|terra`` pick a model FAMILY and always
+run its newest member (resolved from ``codex debug models``, cached an hour).
+``chatgpt`` alone is the CLI's built-in default model. ``chatgpt:<model-id>``
+pins one (Custom model ID in the dashboard).
 
 Required env vars (same as Cleo):
   SWITCHBOARD_URL, SWITCHBOARD_MCP_TOKEN
@@ -40,11 +41,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -80,12 +83,73 @@ BASE_INSTRUCTIONS = (
 _ROLE_LABEL = {"user": "USER", "assistant": "ASSISTANT", "system": "SYSTEM", "tool": "TOOL RESULT"}
 
 
+# ChatGPT model families offered in the desk's menus. The desk sends
+# "chatgpt:<family>"; the handler resolves it at call time to the newest model
+# of that family the Codex CLI lists (e.g. "sol" -> "gpt-6-sol", and "terra" ->
+# "gpt-5.6-terra" until a GPT-6 Terra ships), so the menus never pin a version.
+FAMILIES = ("astra", "sol", "luna", "terra")
+# Used only if `codex debug models` cannot be read (verified 2026-09-27).
+FALLBACK_FAMILY_MODELS = {
+    "astra": "gpt-6-astra", "sol": "gpt-6-sol",
+    "luna": "gpt-6-luna", "terra": "gpt-5.6-terra",
+}
+MODEL_LIST_TTL_S = float(os.environ.get("CODEX_MODEL_LIST_TTL_S", "3600"))
+_SLUG_RE = re.compile(r"^gpt-(\d+(?:\.\d+)*)-([a-z]+)$")
+_model_cache: dict = {"at": 0.0, "families": {}}
+_model_cache_lock = threading.Lock()
+
+
+def latest_by_family(models: list) -> dict:
+    """{family: newest listed slug} from `codex debug models` entries."""
+    best: dict = {}
+    for m in models or []:
+        if not isinstance(m, dict) or m.get("visibility", "list") != "list":
+            continue
+        match = _SLUG_RE.match(str(m.get("slug") or ""))
+        if not match:
+            continue
+        version = tuple(int(x) for x in match.group(1).split("."))
+        family = match.group(2)
+        if family not in best or version > best[family][0]:
+            best[family] = (version, m["slug"])
+    return {fam: slug for fam, (_, slug) in best.items()}
+
+
+def _load_family_models() -> dict:
+    out = subprocess.run(
+        [CODEX_BIN, "debug", "models"], capture_output=True, text=True, timeout=30,
+    )
+    start = out.stdout.find("{")
+    data = json.loads(out.stdout[start:]) if start >= 0 else {}
+    return latest_by_family(data.get("models") or [])
+
+
+def resolve_family(family: str) -> str:
+    """Newest model slug for a family, refreshed at most once per TTL."""
+    now = time.monotonic()
+    with _model_cache_lock:
+        fresh = now - _model_cache["at"] < MODEL_LIST_TTL_S and _model_cache["families"]
+        if not fresh:
+            try:
+                families = _load_family_models()
+                if families:
+                    _model_cache.update(at=now, families=families)
+            except Exception as exc:  # the CLI's model list is best-effort
+                log.warning("codex model list unavailable (%s) — using fallbacks", exc)
+        families = _model_cache["families"]
+    return families.get(family) or FALLBACK_FAMILY_MODELS[family]
+
+
 def model_arg(model: str | None) -> str | None:
     """The ``-m`` value for a requested model, or None for the CLI default."""
     m = (model or "").strip()
     if m.lower().startswith("chatgpt:"):
         m = m.split(":", 1)[1].strip()
-    return None if m.lower() in LATEST_ALIASES else m
+    if m.lower() in LATEST_ALIASES:
+        return None
+    if m.lower() in FAMILIES:
+        return resolve_family(m.lower())
+    return m
 
 
 def build_prompt(system: str, messages: list, tools: list) -> str:

@@ -158,8 +158,11 @@ def test_hung_codex_is_killed_by_the_watchdog(codex, fake, monkeypatch):
 @pytest.mark.parametrize("model,expected", [
     ("chatgpt", None), ("", None), ("GPT", None), ("latest", None),
     ("chatgpt:gpt-6-astra", "gpt-6-astra"), ("gpt-6-astra", "gpt-6-astra"),
+    ("chatgpt:sol", "gpt-7-sol"), ("chatgpt:Terra", "gpt-5.6-terra"),
 ])
-def test_model_arg(codex, model, expected):
+def test_model_arg(codex, model, expected, monkeypatch):
+    monkeypatch.setattr(codex, "_load_family_models",
+                        lambda: {"sol": "gpt-7-sol", "terra": "gpt-5.6-terra"})
     assert codex.model_arg(model) == expected
     cmd = codex.build_command(model)
     assert (cmd[cmd.index("-m") + 1] if "-m" in cmd else None) == expected
@@ -172,3 +175,41 @@ def test_main_registers_as_codex_with_chatgpt_default(codex, monkeypatch):
     assert seen["default_agent_id"] == "codex"
     assert seen["default_model"] == "chatgpt"
     assert seen["backend"] is codex.call_codex_streaming
+
+
+_LISTING = [
+    {"slug": "gpt-6-astra", "visibility": "list"},
+    {"slug": "gpt-6-sol", "visibility": "list"},
+    {"slug": "gpt-5.6-sol", "visibility": "list"},
+    {"slug": "gpt-6-luna", "visibility": "list"},
+    {"slug": "gpt-5.6-luna", "visibility": "list"},
+    {"slug": "gpt-5.6-terra", "visibility": "list"},
+    {"slug": "gpt-5.10-terra", "visibility": "hide"},   # hidden: never chosen
+    {"slug": "gpt-reserve", "visibility": "hide"},
+    {"slug": "gpt-5.5", "visibility": "list"},           # no family suffix
+]
+
+
+def test_latest_by_family_picks_newest_listed_version(codex):
+    assert codex.latest_by_family(_LISTING) == {
+        "astra": "gpt-6-astra", "sol": "gpt-6-sol",
+        "luna": "gpt-6-luna", "terra": "gpt-5.6-terra",
+    }
+    newer = _LISTING + [{"slug": "gpt-6.1-terra", "visibility": "list"}]
+    assert codex.latest_by_family(newer)["terra"] == "gpt-6.1-terra"
+
+
+def test_family_resolution_is_cached_and_falls_back(codex, monkeypatch):
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("cli down")
+
+    monkeypatch.setattr(codex, "_load_family_models", boom)
+    assert codex.resolve_family("luna") == codex.FALLBACK_FAMILY_MODELS["luna"]
+
+    monkeypatch.setattr(codex, "_load_family_models", lambda: calls.append(1) or {"luna": "gpt-7-luna"})
+    assert codex.resolve_family("luna") == "gpt-7-luna"
+    assert codex.resolve_family("luna") == "gpt-7-luna"   # served from cache
+    assert len(calls) == 2

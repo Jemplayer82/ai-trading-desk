@@ -33,7 +33,10 @@ def test_chatgpt_agent_is_configurable(monkeypatch):
     assert _model("chatgpt").target_agent_id == "gpt-box"
 
 
-def test_menus_offer_chatgpt_latest_in_both_roles():
+def test_menus_offer_every_chatgpt_family_in_both_roles():
     from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
     for mode in ("quick", "deep"):
-        assert "chatgpt" in [v for _, v in MODEL_OPTIONS["switchboard"][mode]]
+        values = [v for _, v in MODEL_OPTIONS["switchboard"][mode]]
+        for fam in ("astra", "sol", "luna", "terra"):
+            assert f"chatgpt:{fam}" in values, (mode, fam)
+            assert _model(f"chatgpt:{fam}").target_agent_id == "codex"

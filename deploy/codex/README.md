@@ -1,6 +1,8 @@
 # Codex — ChatGPT handler for the switchboard
 
-`scripts/codex_llm_handler.py` is Cleo's ChatGPT twin. It answers the desk's
+`scripts/codex_llm_handler.py` is Cleo's ChatGPT twin. It answers the desk's ChatGPT
+family entries (`chatgpt:astra|sol|luna|terra`, each resolved at call time to
+the newest model of that family from `codex debug models`), plus the
 `chatgpt` model (always the Codex CLI's current default model) and
 `chatgpt:<model-id>` pins by running `codex exec` on the host's
 **Sign in with ChatGPT** session. Usage counts against the ChatGPT plan; there
