@@ -932,9 +932,15 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
         log.debug("dup-registration check skipped: %s", exc)
 
     primary_label = os.environ.get("SWITCHBOARD_LABEL", "trading")
-    AUTH_HEALTH.status_hooks.append(
-        lambda activity: bus("set_status", {"agent_id": agent_id, "activity": activity}))
-    for peer in _load_peers(url):
+    # Inbox parking, peer-board presence and Claude auth alerting belong to
+    # Cleo only: the parked file feeds interactive Claude Code sessions, and a
+    # second daemon (e.g. the Codex handler) must neither squat its agent id on
+    # other boards nor push its DMs into that queue.
+    is_cleo = backend is None
+    if is_cleo:
+        AUTH_HEALTH.status_hooks.append(
+            lambda activity: bus("set_status", {"agent_id": agent_id, "activity": activity}))
+    for peer in (_load_peers(url) if is_cleo else []):
         threading.Thread(target=_park_poller, args=(peer, agent_id),
                          name=f"park-{peer['label']}", daemon=True).start()
         AUTH_HEALTH.status_hooks.append(
@@ -974,13 +980,17 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
 
         for msg in result.get("messages", []):
             if msg.get("type") != "llm_request":
-                park_message(primary_label, msg)
+                if is_cleo:
+                    park_message(primary_label, msg)
+                else:
+                    log.info("ignoring %s from=%s (only llm_request is served)",
+                             msg.get("type"), msg.get("from"))
                 continue
             if not inflight.acquire(blocking=False):
                 log.warning("at capacity (%d in flight) — rejecting message %s",
                             MAX_INFLIGHT, msg.get("id"))
                 _send_error(msg, url, token, agent_id,
-                            f"Cleo is at capacity ({MAX_INFLIGHT} requests in "
+                            f"{display_name} is at capacity ({MAX_INFLIGHT} requests in "
                             f"flight); try again shortly")
                 continue
             executor.submit(_dispatch, msg, url, token, agent_id, inflight,
@@ -1052,10 +1062,12 @@ def _dispatch(msg: dict, url: str, token: str, agent_id: str,
               backend=None, default_model: str | None = None) -> None:
     try:
         handle_request(msg, url, token, agent_id, backend=backend, default_model=default_model)
-        AUTH_HEALTH.record(None)
+        if backend is None:  # Claude-login health is Cleo's alone
+            AUTH_HEALTH.record(None)
     except Exception as exc:
         log.exception("Error handling message %s", msg.get("id"))
-        AUTH_HEALTH.record(str(exc))
+        if backend is None:
+            AUTH_HEALTH.record(str(exc))
         _send_error(msg, url, token, agent_id, str(exc))
     finally:
         if inflight is not None:

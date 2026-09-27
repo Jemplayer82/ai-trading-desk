@@ -251,3 +251,34 @@ def test_failed_model_list_is_not_retried_per_request(codex, monkeypatch):
     codex._model_cache.update(at=0.0, families={"sol": "gpt-7-sol"})
     monkeypatch.setattr(codex, "_load_family_models", lambda: {})
     assert codex.resolve_family("sol") == "gpt-7-sol"
+
+
+def test_codex_daemon_does_not_touch_cleos_inbox_or_auth_alarm(codex, monkeypatch, tmp_path):
+    """Only Cleo parks DMs, watches peer boards and raises Claude-login alerts."""
+    base = codex.base
+    calls = []
+    monkeypatch.setattr(base, "_load_peers", lambda url: calls.append("peers") or [])
+    monkeypatch.setattr(base, "park_message", lambda *a, **k: calls.append("park"))
+    monkeypatch.setattr(base.AUTH_HEALTH, "record", lambda err: calls.append("auth"))
+    monkeypatch.setattr(base, "_acquire_single_instance_lock", lambda agent_id: None)
+    monkeypatch.setenv("SWITCHBOARD_URL", "http://bus")
+    monkeypatch.setenv("SWITCHBOARD_MCP_TOKEN", "t")
+
+    polls = {"n": 0}
+
+    def fake_bus(url, token, tool, args, timeout=35.0):
+        if tool == "wait_for_message":
+            polls["n"] += 1
+            if polls["n"] > 1:
+                raise KeyboardInterrupt  # stop the main loop
+            return {"messages": [{"id": 1, "from": "someone", "type": "chat", "content": "hi"}]}
+        return {"agents": []}
+
+    monkeypatch.setattr(base, "bus_call", fake_bus)
+    with pytest.raises(KeyboardInterrupt):
+        codex.main()
+    assert calls == []
+
+    base._dispatch({"id": 2, "from": "x", "content": "{bad json"}, "http://bus", "t", "codex",
+                   None, backend=codex.call_codex_streaming)
+    assert "auth" not in calls
