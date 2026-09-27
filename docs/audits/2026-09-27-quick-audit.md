@@ -29,3 +29,12 @@ Not found: the three accounting/restart bugs fixed at close-out (b1b4563) stay f
 
 ## Not done at this level
 Executed security probes (unauthenticated sweep of every route, injection payloads, hostile prompts against the handlers with a fake CLI), concurrency and time-calendar lenses, test-quality review, plan-conformance against the spec — these are the `deep` level of `dev-pipeline/audit.workflow.js`.
+
+## Resolution
+
+All seven findings fixed in commit 3626b29 (same day) and deployed: lock upgraded
+(pip-audit now reports no known advisories), Codex error text and negative cache,
+Cleo repo/host merge with the lock file moved out of /tmp, cancelled runs excluded
+from the retry cap, and schedule settings validated at save time. Post-deploy
+smoke on the new image: yfinance 1.7 pre-screen/live quotes/price bars OK, Claude
+quick+deep via Cleo OK, ChatGPT via Codex OK, settings PUT rejects 22:00/05:30/abc.
