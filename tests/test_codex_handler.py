@@ -117,6 +117,11 @@ def test_runs_locked_down_in_a_throwaway_dir(codex, fake):
     disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
     assert {"shell_tool", "unified_exec", "browser_use", "computer_use", "plugins"} <= disabled
     assert "-m" not in argv and argv[-1] == "-"
+    configs = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+    assert 'web_search="disabled"' in configs
+    instr = [c for c in configs if c.startswith("model_instructions_file=")]
+    assert len(instr) == 1 and "codex-llm-" in instr[0]
+    assert "skill_mcp_dependency_install" in disabled
     assert "codex-llm-" in rec["cwd"]
     assert not Path(rec["cwd"]).exists()  # removed after the call
 

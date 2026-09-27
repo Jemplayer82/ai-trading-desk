@@ -32,6 +32,7 @@ commands or read files.
 
 ## Cost
 
-Each call carries ~12k tokens of Codex's own instructions on top of the desk's
+Each call carries ~5.6k tokens of fixed Codex overhead (its own instructions are
+replaced by a one-line file; down from ~12k) on top of the desk's
 prompt, and the reply arrives in one piece (no token streaming). The per-call
 deadline is `CODEX_CALL_TIMEOUT_S` (default 170 s, below the desk's 180 s).

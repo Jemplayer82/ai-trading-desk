@@ -64,7 +64,17 @@ LATEST_ALIASES = frozenset({"", "chatgpt", "gpt", "codex", "latest"})
 DISABLED_FEATURES = (
     "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external",
     "computer_use", "in_app_browser", "plugins", "remote_plugin", "sleep_tool",
-    "tool_suggest",
+    "tool_suggest", "skill_mcp_dependency_install",
+)
+
+# Replaces Codex's own ~4k-token coding-agent instructions. Together with the
+# disabled features and web search off this cuts the fixed per-call overhead
+# from ~12.2k to ~5.6k input tokens (measured 2026-09-26, codex-cli 0.157.1).
+# The desk's real system prompt still travels in the user prompt.
+BASE_INSTRUCTIONS = (
+    "You are a model answering requests for an automated equity-research "
+    "pipeline. Answer the request directly and concisely. You have no shell, "
+    "files, browser or web access.\n"
 )
 
 _ROLE_LABEL = {"user": "USER", "assistant": "ASSISTANT", "system": "SYSTEM", "tool": "TOOL RESULT"}
@@ -98,11 +108,14 @@ def build_prompt(system: str, messages: list, tools: list) -> str:
     return "\n\n".join(parts)
 
 
-def build_command(model: str | None) -> list[str]:
+def build_command(model: str | None, instructions_file: str | None = None) -> list[str]:
     cmd = [
         CODEX_BIN, "exec", "--json", "--ephemeral", "--skip-git-repo-check",
         "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only",
+        "-c", 'web_search="disabled"',
     ]
+    if instructions_file:
+        cmd += ["-c", f"model_instructions_file={json.dumps(instructions_file)}"]
     for feature in DISABLED_FEATURES:
         cmd += ["--disable", feature]
     m = model_arg(model)
@@ -149,8 +162,11 @@ def call_codex_streaming(model: str, system: str, messages: list, tools: list, m
     """
     prompt = build_prompt(system, messages, tools)
     workdir = tempfile.mkdtemp(prefix="codex-llm-")
+    instructions = os.path.join(workdir, "instructions.md")
+    with open(instructions, "w", encoding="utf-8") as fh:
+        fh.write(BASE_INSTRUCTIONS)
     proc = subprocess.Popen(
-        build_command(model),
+        build_command(model, instructions),
         cwd=workdir,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
