@@ -39,12 +39,6 @@
   <!-- TIER:2 BEGIN -->
   <script src="/static/portfolio.js" defer></script>
   <!-- TIER:2 END -->
-  <!-- TIER:3 BEGIN -->
-  <script src="/static/spy.js" defer></script>
-  <!-- TIER:3 END -->
-  <!-- TIER:4 BEGIN -->
-  <script src="/static/options.js" defer></script>
-  <!-- TIER:4 END -->
   <script src="/static/credentials.js" defer></script>
 </head>
 <body>
@@ -101,12 +95,6 @@
       <!-- TIER:2 BEGIN -->
       <button class="main-tab" id="tab-portfolio" data-tab="portfolio">Portfolio Scan</button>
       <!-- TIER:2 END -->
-      <!-- TIER:3 BEGIN -->
-      <button class="main-tab" data-tab="spy">S&amp;P 500</button>
-      <!-- TIER:3 END -->
-      <!-- TIER:4 BEGIN -->
-      <button class="main-tab" data-tab="options">Options</button>
-      <!-- TIER:4 END -->
       <button class="main-tab" data-tab="keys">Settings</button>
     </nav>
     <div class="stats">
@@ -323,176 +311,7 @@
   </main>
   <!-- TIER:2 END -->
 
-  <!-- TIER:3 BEGIN -->
-  <!-- ===== TAB: S&P 500 Portfolio Builder (spy.js) =====
-       #spy-main is rebuilt wholesale by spy.js renderSpyScan on each load/poll. -->
-  <main class="layout tab-pane" data-pane="spy" hidden>
-    <aside class="sidebar panel">
-      <div class="sidebar-tabs">
-        <button class="stab" data-stab-target="spy-queue">Queue</button>
-        <button class="stab active" data-stab-target="spy-history">History</button>
-        <button id="spy-history-clear-btn" class="panel-action" title="Clear all history" style="margin-left:auto;">clear</button>
-      </div>
-      <ul id="spy-queue" class="history" hidden></ul>
-      <ul id="spy-history" class="history"></ul>
-    </aside>
 
-    <section class="main">
-      <div class="panel">
-        <div class="panel-title">[ S&amp;P 500 Scanner ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Trades every weekday from the shared 00:00 ET research (top 150 movers + SPY quick-scanned, top 50 + SPY deep-dived). Each account allocates at its own time; fills use live quotes after 09:35 ET.</p>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;">
-          <span id="spy-research-status" class="dim"></span>
-          <span style="flex:1;"></span>
-          <label>Research time (ET) <input type="time" id="spy-research-time" onchange="saveResearchTime()"></label> <span id="spy-research-time-status" class="dim" style="font-size:11px;"></span>
-        </div>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-          <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
-          <select id="spy-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>
-          <button id="btn-manage-accounts" type="button" class="ghost" style="font-size:11px;padding:5px 10px;">⚙ Accounts</button>
-          <span style="flex:1;"></span>
-          <span id="spy-account-meta" class="dim" style="font-size:11px;"></span>
-        </div>
-        <div class="actions" style="justify-content: flex-start; gap: 10px;">
-          <button id="btn-spy-scan" type="button" class="primary">Allocate now</button>
-          <button id="btn-spy-stop" type="button" class="ghost" hidden>Stop Scan</button>
-          <button id="btn-spy-account" type="button" class="ghost">Refresh</button>
-          <span id="spy-scan-status" class="dim" style="margin-left: 4px;"></span>
-        </div>
-      </div>
-
-      <!-- Paper accounts management modal -->
-      <div id="paper-accounts-modal" hidden style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center;">
-        <div style="background:var(--panel);border:1px solid var(--panel-border);border-radius:6px;padding:24px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-            <span style="font-size:14px;font-weight:700;color:var(--text);">Paper Accounts</span>
-            <button type="button" id="btn-close-accounts" class="ghost" style="padding:4px 10px;">×</button>
-          </div>
-          <div id="paper-accounts-list" style="margin-bottom:16px;"></div>
-          <hr style="border-color:var(--panel-border);margin:12px 0;">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-bottom:10px;">New Account</div>
-          <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:8px;">
-            <label>Name<input type="text" id="new-acct-name" placeholder="e.g. Aggressive Growth" style="margin-top:4px;"></label>
-            <label>Capital ($)<input type="number" id="new-acct-capital" value="100000" min="1000" step="1000" style="margin-top:4px;"></label>
-            <label>Aggressiveness
-              <div class="slider-row" style="margin-top:4px;">
-                <input type="range" id="new-acct-agg" min="1" max="10" value="5" step="1">
-                <span id="new-acct-agg-val" class="slider-val">5</span>
-              </div>
-            </label>
-            <label>Bias
-              <div class="bias-toggle" id="new-acct-bias" style="margin-top:4px;">
-                <button type="button" data-val="bearish" class="bias-btn">Bearish</button>
-                <button type="button" data-val="neutral" class="bias-btn active">Neutral</button>
-                <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
-              </div>
-            </label>
-            <label>Allocation time (ET)<input type="time" id="new-acct-schedule" style="margin-top:4px;"></label>
-            <label>Stop policy<select id="new-acct-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
-            <label id="new-acct-stop-value-wrap" hidden><span id="new-acct-stop-value-label">Stop below entry (%)</span><input type="number" id="new-acct-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
-            <label id="new-acct-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="new-acct-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
-          </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs. A blank allocation time means the account only trades when you click Allocate now. Trades fill after the 09:35 ET open from that morning's shared research. The stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order.</p>
-          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
-            <button type="button" id="btn-create-account" class="primary">Create Account</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="spy-main"></div>
-    </section>
-  </main>
-  <!-- TIER:3 END -->
-
-  <!-- TIER:4 BEGIN -->
-  <!-- ===== TAB: Options paper trading (options.js) =====
-       #options-main is rebuilt wholesale by options.js renderOptionsScan. -->
-  <main class="layout tab-pane" data-pane="options" hidden>
-    <aside class="sidebar panel">
-      <div class="sidebar-tabs">
-        <button class="stab" data-stab-target="options-queue">Queue</button>
-        <button class="stab active" data-stab-target="options-history">History</button>
-        <button id="options-history-clear-btn" class="panel-action" title="Clear all options scans" style="margin-left:auto;">clear</button>
-      </div>
-      <ul id="options-queue" class="history" hidden></ul>
-      <ul id="options-history" class="history"></ul>
-    </aside>
-
-    <section class="main">
-      <div class="panel">
-        <div class="panel-title">[ Options Paper Trader ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Long calls/puts on S&amp;P 500 movers, 100% simulated. Each account buys/holds/closes single-leg contracts from the shared daily research. Auto-allocates Mon–Fri at each account's time (default 09:00 ET) from the shared 00:00 research; fills after 09:35 ET.</p>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-          <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
-          <select id="opt-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>
-          <button id="btn-manage-opt-accounts" type="button" class="ghost" style="font-size:11px;padding:5px 10px;">⚙ Accounts</button>
-          <span style="flex:1;"></span>
-          <span id="opt-account-meta" class="dim" style="font-size:11px;"></span>
-        </div>
-        <div style="margin-bottom:10px;font-size:11px;"><span id="opt-research-status" class="dim"></span></div>
-        <div class="actions" style="justify-content: flex-start; gap: 10px;">
-          <button id="btn-options-scan" type="button" class="primary">Allocate now</button>
-          <button id="btn-options-stop" type="button" class="ghost" hidden>Stop Scan</button>
-          <button id="btn-options-refresh" type="button" class="ghost">Refresh Marks</button>
-          <span id="options-scan-status" class="dim" style="margin-left: 4px;"></span>
-        </div>
-      </div>
-
-      <!-- On-demand single-ticker recommendation (options.js: recommendTicker) -->
-      <div class="panel">
-        <div class="panel-title">[ Ticker Recommendation ]</div>
-        <p class="dim" style="margin:0 0 10px;">Ask for a specific contract on any ticker: momentum quick-read → vet the call AND the put → advisor pick with confidence, informed by the system's graded history and its own options lessons. Advisory only — nothing is traded.</p>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <input type="text" id="opt-rec-ticker" placeholder="e.g. AAPL" maxlength="10"
-                 style="width:130px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 10px;font-family:inherit;font-size:13px;border-radius:3px;text-transform:uppercase;">
-          <button id="btn-opt-recommend" type="button" class="primary">Get Recommendation</button>
-          <span id="opt-rec-status" class="dim" style="font-size:12px;"></span>
-        </div>
-        <div id="opt-rec-result" style="margin-top:12px;"></div>
-      </div>
-
-      <!-- Options paper accounts management modal -->
-      <div id="opt-accounts-modal" hidden style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center;">
-        <div style="background:var(--panel);border:1px solid var(--panel-border);border-radius:6px;padding:24px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-            <span style="font-size:14px;font-weight:700;color:var(--text);">Options Paper Accounts</span>
-            <button type="button" id="btn-close-opt-accounts" class="ghost" style="padding:4px 10px;">×</button>
-          </div>
-          <div id="opt-accounts-list" style="margin-bottom:16px;"></div>
-          <hr style="border-color:var(--panel-border);margin:12px 0;">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-bottom:10px;">New Account</div>
-          <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:8px;">
-            <label>Name<input type="text" id="opt-new-name" placeholder="e.g. Options Hunter" style="margin-top:4px;"></label>
-            <label>Capital ($)<input type="number" id="opt-new-capital" value="100000" min="1000" step="1000" style="margin-top:4px;"></label>
-            <label>Aggressiveness
-              <div class="slider-row" style="margin-top:4px;">
-                <input type="range" id="opt-new-agg" min="1" max="10" value="5" step="1">
-                <span id="opt-new-agg-val" class="slider-val">5</span>
-              </div>
-            </label>
-            <label>Bias
-              <div class="bias-toggle" id="opt-new-bias" style="margin-top:4px;">
-                <button type="button" data-val="bearish" class="bias-btn">Bearish</button>
-                <button type="button" data-val="neutral" class="bias-btn active">Neutral</button>
-                <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
-              </div>
-            </label>
-            <label>Allocation time (ET)<input type="time" id="opt-new-schedule" style="margin-top:4px;"></label>
-            <label>Stop policy<select id="opt-new-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
-            <label id="opt-new-stop-value-wrap" hidden><span id="opt-new-stop-value-label">Stop below entry (%)</span><input type="number" id="opt-new-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
-            <label id="opt-new-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="opt-new-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
-          </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets the premium budget (5–12% per position, 15–50% total at risk). Bias nudges calls vs puts. A blank allocation time means the account only allocates when you click Allocate now. Stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order. Allocation waits for today's shared research and the 09:35 ET open before trading.</p>
-          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
-            <button type="button" id="btn-create-opt-account" class="primary">Create Account</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="options-main"></div>
-    </section>
-  </main>
-  <!-- TIER:4 END -->
 
   <!-- ===== TAB: Settings / API Keys (credentials.js; pane name is "keys") ===== -->
   <main class="layout single tab-pane" data-pane="keys" hidden>
