@@ -244,6 +244,9 @@ def save_setting_endpoint(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     value = (payload or {}).get("value")
     if value is None or str(value) == "":
         raise HTTPException(status_code=400, detail="missing 'value' in body")
+    problem = creds.validate_setting_value(key, str(value).strip())
+    if problem:
+        raise HTTPException(status_code=400, detail=f"{key}: {problem}")
     db.set_app_setting(key, str(value))
     creds.apply_settings_to_env()
     return {"status": "saved", "key": key, "masked": creds.mask_setting(key, str(value))}

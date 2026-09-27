@@ -149,6 +149,25 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     # TIER:3 END
 ]
 
+def validate_setting_value(key: str, value: str) -> str | None:
+    """Return an error message if ``value`` is not acceptable for ``key``.
+
+    Schedule settings must be 24-hour HH:MM; the shared research time must
+    also fall before the 05:30 ET research cutoff, because the scheduler
+    silently falls back to 00:00 otherwise (web/scheduler.py research_time).
+    """
+    from . import account_policy  # local: credentials is imported early by db/main
+
+    if key in ("SCHEDULE_NIGHTLY_SCAN_TIME", "SCHEDULE_RESEARCH_TIME"):
+        hm = account_policy.parse_hhmm(value)
+        if hm is None:
+            return "must be a 24-hour time HH:MM"
+        if key == "SCHEDULE_RESEARCH_TIME" and hm >= (5, 30):
+            return ("must be between 00:00 and 05:29 ET — research runs for the day it "
+                    "fires on and has to finish before that day's 10:30 allocation deadline")
+    return None
+
+
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}
 _REGISTRY_KEYS = set(_REGISTRY_BY_KEY)
 

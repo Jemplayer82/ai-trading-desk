@@ -1567,10 +1567,15 @@ def latest_research_scan(trade_date: str, *, completed_only: bool = False) -> di
 
 
 def count_research_attempts(trade_date: str) -> int:
-    """Count every kind='research' scan attempt for a trade date."""
+    """Count kind='research' attempts for a trade date, excluding cancelled runs.
+
+    The scheduler's retry cap (RESEARCH_MAX_ATTEMPTS) compares against this, so
+    a run the operator cancelled on purpose must not consume an attempt.
+    """
     with connect() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM spy_scans WHERE kind = 'research' AND trade_date = ?",
+            "SELECT COUNT(*) AS n FROM spy_scans "
+            "WHERE kind = 'research' AND trade_date = ? AND status != 'cancelled'",
             (trade_date,),
         ).fetchone()
     return int(row["n"]) if row else 0

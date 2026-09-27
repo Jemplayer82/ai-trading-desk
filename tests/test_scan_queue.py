@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._route_paths import app_route_paths
 from web import db, features, portfolio_main, scan_queue
 
 pytestmark = pytest.mark.unit
@@ -204,7 +205,7 @@ class TestPortfolioAppTierGating:
                 monkeypatch.setenv(k, v)
             importlib.reload(features)
             importlib.reload(portfolio_main)
-            return {r.path for r in portfolio_main.app.routes if hasattr(r, "path")}
+            return app_route_paths(portfolio_main.app)
 
         yield _load
         # Leave web.portfolio_main.app back at the default tier for any test

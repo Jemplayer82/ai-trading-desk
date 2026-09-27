@@ -207,9 +207,47 @@ def test_family_resolution_is_cached_and_falls_back(codex, monkeypatch):
         raise RuntimeError("cli down")
 
     monkeypatch.setattr(codex, "_load_family_models", boom)
+    codex._model_cache.update(at=0.0, families={})
     assert codex.resolve_family("luna") == codex.FALLBACK_FAMILY_MODELS["luna"]
 
+    codex._model_cache["at"] = 0.0  # retry window elapsed
     monkeypatch.setattr(codex, "_load_family_models", lambda: calls.append(1) or {"luna": "gpt-7-luna"})
     assert codex.resolve_family("luna") == "gpt-7-luna"
     assert codex.resolve_family("luna") == "gpt-7-luna"   # served from cache
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("event,expected", [
+    ({"type": "error", "status": 400, "error": {"type": "invalid_request_error",
+      "message": "The 'gpt-6-terra' model is not supported"}},
+     "The 'gpt-6-terra' model is not supported (HTTP 400)"),
+    ({"type": "error", "status": 429, "error": {"message": "usage limit reached"}}, "usage limit reached (HTTP 429)"),
+    ({"type": "turn.failed", "error": "plain string error"}, "plain string error"),
+    ({"type": "turn.failed", "error": {"message": ""}}, "codex turn failed"),
+    ({"type": "error", "message": "top-level message"}, "top-level message"),
+    ({"type": "error"}, "codex error"),
+])
+def test_error_events_keep_the_api_message(codex, event, expected):
+    import json
+    text, err = codex.parse_events([json.dumps({"type": "turn.started"}), json.dumps(event)])
+    assert text == ""
+    assert err == expected
+
+
+def test_failed_model_list_is_not_retried_per_request(codex, monkeypatch):
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("cli down")
+
+    monkeypatch.setattr(codex, "_load_family_models", boom)
+    codex._model_cache.update(at=0.0, families={})
+    for _ in range(5):
+        assert codex.resolve_family("sol") == codex.FALLBACK_FAMILY_MODELS["sol"]
+    assert len(calls) == 1  # negative-cached for MODEL_LIST_RETRY_S
+
+    # An empty list keeps the last good one rather than replacing it.
+    codex._model_cache.update(at=0.0, families={"sol": "gpt-7-sol"})
+    monkeypatch.setattr(codex, "_load_family_models", lambda: {})
+    assert codex.resolve_family("sol") == "gpt-7-sol"

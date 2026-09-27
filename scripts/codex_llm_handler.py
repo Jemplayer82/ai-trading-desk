@@ -94,6 +94,9 @@ FALLBACK_FAMILY_MODELS = {
     "luna": "gpt-6-luna", "terra": "gpt-5.6-terra",
 }
 MODEL_LIST_TTL_S = float(os.environ.get("CODEX_MODEL_LIST_TTL_S", "3600"))
+# After a failed/empty model-list load, use the fallback table for this long
+# before trying `codex debug models` again (no 30 s subprocess per request).
+MODEL_LIST_RETRY_S = float(os.environ.get("CODEX_MODEL_LIST_RETRY_S", "600"))
 _SLUG_RE = re.compile(r"^gpt-(\d+(?:\.\d+)*)-([a-z]+)$")
 _model_cache: dict = {"at": 0.0, "families": {}}
 _model_cache_lock = threading.Lock()
@@ -128,14 +131,17 @@ def resolve_family(family: str) -> str:
     """Newest model slug for a family, refreshed at most once per TTL."""
     now = time.monotonic()
     with _model_cache_lock:
-        fresh = now - _model_cache["at"] < MODEL_LIST_TTL_S and _model_cache["families"]
-        if not fresh:
+        ttl = MODEL_LIST_TTL_S if _model_cache["families"] else MODEL_LIST_RETRY_S
+        if _model_cache["at"] == 0.0 or now - _model_cache["at"] >= ttl:
             try:
                 families = _load_family_models()
-                if families:
-                    _model_cache.update(at=now, families=families)
             except Exception as exc:  # the CLI's model list is best-effort
-                log.warning("codex model list unavailable (%s) — using fallbacks", exc)
+                families = {}
+                log.warning("codex model list unavailable (%s) — using fallbacks for %.0fs",
+                            exc, MODEL_LIST_RETRY_S)
+            if not families and _model_cache["families"]:
+                families = _model_cache["families"]  # keep the last good list
+            _model_cache.update(at=now, families=families)
         families = _model_cache["families"]
     return families.get(family) or FALLBACK_FAMILY_MODELS[family]
 
@@ -189,6 +195,27 @@ def build_command(model: str | None, instructions_file: str | None = None) -> li
     return cmd
 
 
+def _error_text(obj: dict, default: str) -> str:
+    """Human-readable error from a codex ``error`` / ``turn.failed`` event.
+
+    Observed shapes: top-level ``message``; ``error`` as a dict with
+    ``message`` (API errors, e.g. ``{"type":"error","status":400,
+    "error":{"type":"invalid_request_error","message":"..."}}``); ``error`` as
+    a plain string. The HTTP status is kept when present so quota (429) and
+    auth (401) failures are distinguishable in the desk's failure alert.
+    """
+    err = obj.get("error")
+    if isinstance(err, dict):
+        text = err.get("message") or err.get("type")
+    elif err is not None:
+        text = str(err)
+    else:
+        text = obj.get("message")
+    text = (text or "").strip() or default
+    status = obj.get("status")
+    return f"{text} (HTTP {status})" if status else text
+
+
 def parse_events(lines) -> tuple[str, str | None]:
     """(reply text, error or None) from ``codex exec --json`` output lines."""
     texts: list[str] = []
@@ -210,9 +237,9 @@ def parse_events(lines) -> tuple[str, str | None]:
         elif etype == "turn.completed":
             completed = True
         elif etype == "turn.failed":
-            error = ((obj.get("error") or {}).get("message")) or "codex turn failed"
+            error = _error_text(obj, "codex turn failed")
         elif etype == "error":
-            error = obj.get("message") or "codex error"
+            error = _error_text(obj, "codex error")
     if error is None and not completed:
         error = "codex exited without completing the turn"
     return "\n\n".join(texts), error

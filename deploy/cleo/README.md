@@ -166,3 +166,13 @@ Cleo drives the host's Claude Code subscription login (`~/.claude`).
 Containerizing means mounting that credential dir read-write (for token refresh),
 which is the one wrinkle that makes the host-process approach simpler. If you
 later want it in the stack, the credential mount is the thing to validate first.
+
+## Updating
+
+The repo file `scripts/cleo_llm_handler.py` is the source of truth for the
+deployed handler (it carries the inbox parking, auth-expiry alerting and the
+lean `claude -p` flags). To update: copy it over `/home/landon/cleo_llm_handler.py`
+**and** `/home/landon/codex-llm/cleo_llm_handler.py` (the Codex daemon imports it),
+then `sudo systemctl restart cleo codex-llm`. The instance lock and the optional
+debug dump live under `$XDG_RUNTIME_DIR` (or `~/.cache/cleo`), never `/tmp`.
+

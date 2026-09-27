@@ -22,7 +22,7 @@ Required env vars:
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: cleo)
   DEFAULT_MODEL           Fallback model if the request doesn't specify one
-                          (default: sonnet — the CLI's always-latest Sonnet alias)
+                          (default: claude-sonnet-5)
   CLAUDE_BIN              Path to claude CLI binary (default: claude)
 
 Usage:
@@ -50,8 +50,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# httpx logs every request at INFO — one line per streamed delta, ~1k lines/min
+# during a debate — which buried two weeks of auth tracebacks. Failures still
+# surface through our own warnings.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "sonnet")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-5")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 
 # Hard ceiling on a single claude -p call. The watchdog kills the subprocess past
@@ -86,6 +90,18 @@ _INSTANCE_LOCK = None
 # and a fresh TCP connection — on every call. bus_call runs once per streamed
 # text delta, so a single analyst report opened thousands of short-lived
 # connections. httpx.Client is safe to share across threads.
+def _state_dir() -> str:
+    """Per-user runtime dir for the instance lock and debug dump.
+
+    Not /tmp: a world-writable directory lets another local user pre-plant a
+    symlink at a predictable name (bandit B108). $XDG_RUNTIME_DIR is per-user
+    and tmpfs when systemd provides it; otherwise ~/.cache/cleo.
+    """
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".cache", "cleo")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return base
+
+
 _HTTP = httpx.Client(
     limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
 )
@@ -164,6 +180,88 @@ def bus_call(url: str, token: str, tool: str, args: dict, timeout: float = 35.0)
         raise RuntimeError(f"Bus tool error: {content[0].get('text', '') if content else result}")
     content = result.get("content") or []
     return json.loads(content[0].get("text", "{}")) if content else {}
+
+
+# ---------------------------------------------------------------------------
+# Parked inbox + auth alerting
+# ---------------------------------------------------------------------------
+
+# wait_for_message drains the whole inbox, so anything that isn't an
+# llm_request used to be silently discarded — DMs meant for an interactive
+# Cleo session never reached one. Park them here instead; the Claude Code
+# digest hook (~/.claude/hooks/switchboard-digest.mjs) surfaces and clears
+# this file at the next session/prompt.
+PARKED_PATH = os.path.expanduser(os.environ.get("CLEO_PARKED_FILE", "~/.switchboard/parked.jsonl"))
+_PARK_LOCK = threading.Lock()
+
+
+def park_message(board: str, msg: dict) -> None:
+    rec = {"board": board, "parked_at": time.time(), **msg}
+    try:
+        with _PARK_LOCK, open(PARKED_PATH, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        log.info("parked %s from=%s on [%s]", msg.get("type"), msg.get("from"), board)
+    except OSError as exc:
+        log.error("could not park message %s: %s", msg.get("id"), exc)
+
+
+# From 2026-09-14 to 09-26 every claude -p call failed with "OAuth session
+# expired" while the service looked healthy. Track consecutive auth failures
+# and make the outage loud: board status, a parked alert for the next session,
+# and an optional webhook (e.g. ntfy / Home Assistant).
+AUTH_ALERT_AFTER = int(os.environ.get("CLEO_AUTH_ALERT_AFTER", "3"))
+ALERT_WEBHOOK = os.environ.get("CLEO_ALERT_WEBHOOK", "")
+_AUTH_MARKERS = ("failed to authenticate", "oauth", "not logged in", "/login")
+
+
+class _AuthHealth:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.failures = 0
+        self.alerted = False
+        self.status_hooks: list = []  # callables(activity: str)
+
+    def _set_status(self, activity: str) -> None:
+        for hook in self.status_hooks:
+            try:
+                hook(activity)
+            except Exception as exc:
+                log.warning("status update failed: %s", exc)
+
+    def record(self, error: str | None) -> None:
+        """Call with None on success, or the error text on failure."""
+        is_auth = error is not None and any(m in error.lower() for m in _AUTH_MARKERS)
+        fire = recovered = False
+        with self._lock:
+            if is_auth:
+                self.failures += 1
+                fire = self.failures >= AUTH_ALERT_AFTER and not self.alerted
+                self.alerted = self.alerted or fire
+            elif error is None:
+                recovered = self.alerted
+                self.failures, self.alerted = 0, False
+            # Non-auth errors (timeouts, bad requests) leave the streak alone.
+            count = self.failures
+        if recovered:
+            log.warning("claude auth recovered")
+            self._set_status("ready")
+            park_message("cleo-daemon", {"from": "cleo-daemon", "type": "alert",
+                                         "content": "claude CLI auth recovered — llm_requests are being served again."})
+        if fire:
+            text = (f"AUTH EXPIRED — claude CLI failed {count}x in a row "
+                    f"({error.strip()[:160]}). Run `claude` then /login on Cleo (192.168.7.50).")
+            log.critical(text)
+            self._set_status(text[:200])
+            park_message("cleo-daemon", {"from": "cleo-daemon", "type": "alert", "content": text})
+            if ALERT_WEBHOOK:
+                try:
+                    _HTTP.post(ALERT_WEBHOOK, content=text.encode(), timeout=10,
+                               headers={"Title": "Cleo daemon: Claude auth expired", "Priority": "high"})
+                except Exception as exc:
+                    log.warning("alert webhook failed: %s", exc)
+
+
+AUTH_HEALTH = _AuthHealth()
 
 
 # ---------------------------------------------------------------------------
@@ -558,10 +656,10 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
         "--no-session-persistence",
         # Background calls must not load the interactive user setup: skip user/
         # project/local settings (hooks, plugins, statusline), skills and
-        # auto-memory. Before 2026-09-26 every call on WebServer ran 5 hooks
-        # (GSD update/state, switchboard digest x2 injecting the inbox into
-        # context, publish) and carried ~3.4k tokens of overhead; now ~0.5k.
-        # Effort stays "high" to match the user setting it used to inherit.
+        # auto-memory. Before 2026-09-26 every call ran 5 hooks (GSD update/state,
+        # switchboard digest x2 injecting the inbox into context, publish) and
+        # carried ~3.4k tokens of overhead; now ~0.5k. Effort stays "high" to
+        # match the user setting it used to inherit.
         "--setting-sources", "",
         "--disable-slash-commands",
         "--settings", json.dumps({"autoMemoryEnabled": False, "effortLevel": "high"}),
@@ -590,7 +688,7 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
 
     if os.environ.get("CLEO_DEBUG_DUMP"):
         try:
-            with open("/tmp/cleo_dump.txt", "a", encoding="utf-8") as _fh:
+            with open(os.path.join(_state_dir(), "cleo_dump.txt"), "a", encoding="utf-8") as _fh:
                 _fh.write("\n\n########## REQUEST ##########\n")
                 _fh.write(f"[id_to_name] {id_to_name}\n")
                 _fh.write(f"[system len] {len(system)}\n")
@@ -781,7 +879,7 @@ def _acquire_single_instance_lock(agent_id: str) -> None:
         import fcntl
     except ImportError:
         return  # non-POSIX — skip the guard
-    lock_path = os.environ.get("CLEO_LOCK_FILE", f"/tmp/cleo-{agent_id}.lock")
+    lock_path = os.environ.get("CLEO_LOCK_FILE") or os.path.join(_state_dir(), f"cleo-{agent_id}.lock")
     lock_file = open(lock_path, "w")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -833,6 +931,16 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
     except Exception as exc:
         log.debug("dup-registration check skipped: %s", exc)
 
+    primary_label = os.environ.get("SWITCHBOARD_LABEL", "trading")
+    AUTH_HEALTH.status_hooks.append(
+        lambda activity: bus("set_status", {"agent_id": agent_id, "activity": activity}))
+    for peer in _load_peers(url):
+        threading.Thread(target=_park_poller, args=(peer, agent_id),
+                         name=f"park-{peer['label']}", daemon=True).start()
+        AUTH_HEALTH.status_hooks.append(
+            lambda activity, p=peer: bus_call(p["base"], p["token"], "set_status",
+                                              {"agent_id": agent_id, "activity": activity}))
+
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
     # Backpressure. Without this, every inbound request is submitted to an
     # unbounded queue holding full conversation payloads; a TradingAgents analyst
@@ -866,6 +974,7 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
 
         for msg in result.get("messages", []):
             if msg.get("type") != "llm_request":
+                park_message(primary_label, msg)
                 continue
             if not inflight.acquire(blocking=False):
                 log.warning("at capacity (%d in flight) — rejecting message %s",
@@ -876,6 +985,51 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
                 continue
             executor.submit(_dispatch, msg, url, token, agent_id, inflight,
                             backend, default_model)
+
+
+def _load_peers(primary_url: str) -> list[dict]:
+    """Extra boards to watch, read from the same ~/.switchboard/config.json the
+    Claude Code hooks use — one place to update when a board rotates its token."""
+    path = os.path.expanduser(os.environ.get("CLEO_BOARDS_CONFIG", "~/.switchboard/config.json"))
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as exc:
+        log.warning("no peer boards (%s): %s", path, exc)
+        return []
+    primary = primary_url.rstrip("/")
+    return [p for p in cfg.get("peers", [])
+            if p.get("base") and p.get("token") and p["base"].rstrip("/") != primary]
+
+
+IDLE_ACTIVITY = "idle — DMs are queued for Cleo's next interactive session"
+
+
+def _park_poller(board: dict, agent_id: str) -> None:
+    """Watch a non-trading board: keep Cleo present and park every DM.
+
+    Nothing here is answered automatically — a headless claude -p has none of
+    an interactive session's tools or context, and auto-replies between agents
+    can loop. The digest hook hands parked DMs to the next session.
+    """
+    base, token, label = board["base"], board["token"], board.get("label", board["base"])
+    registered = False
+    while True:
+        try:
+            if not registered:
+                bus_call(base, token, "register_agent", {"agent_id": agent_id, "name": "cleo"})
+                bus_call(base, token, "set_status", {"agent_id": agent_id, "activity": IDLE_ACTIVITY})
+                log.info("watching [%s] %s — DMs will be parked", label, base)
+                registered = True
+            result = bus_call(base, token, "wait_for_message",
+                              {"agent_id": agent_id, "timeout_seconds": 25})
+        except Exception as exc:
+            log.warning("[%s] poll error: %s — retrying in 10s", label, exc)
+            registered = False
+            time.sleep(10)
+            continue
+        for msg in result.get("messages", []):
+            park_message(label, msg)
 
 
 def _send_error(msg: dict, url: str, token: str, agent_id: str, error: str) -> None:
@@ -898,8 +1052,10 @@ def _dispatch(msg: dict, url: str, token: str, agent_id: str,
               backend=None, default_model: str | None = None) -> None:
     try:
         handle_request(msg, url, token, agent_id, backend=backend, default_model=default_model)
+        AUTH_HEALTH.record(None)
     except Exception as exc:
         log.exception("Error handling message %s", msg.get("id"))
+        AUTH_HEALTH.record(str(exc))
         _send_error(msg, url, token, agent_id, str(exc))
     finally:
         if inflight is not None:

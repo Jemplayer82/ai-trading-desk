@@ -146,3 +146,13 @@ def test_list_deep_dived_results(tmp_db):
     assert row["reasoning"] == "good"
     assert row["analysis_id"] == aid_a
     assert row["final_decision"] == "Rating: Buy"
+
+
+def test_cancelled_research_runs_do_not_count_as_attempts(tmp_db):
+    td = "2026-10-01"
+    a = db.create_spy_scan(td, kind="research", status="pending")
+    db.update_spy_scan(a, status="cancelled")
+    assert db.count_research_attempts(td) == 0
+    b = db.create_spy_scan(td, kind="research", status="pending")
+    db.fail_spy_scan(b, "boom")
+    assert db.count_research_attempts(td) == 1

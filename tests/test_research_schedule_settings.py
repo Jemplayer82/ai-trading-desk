@@ -51,3 +51,18 @@ def test_entry_sits_inside_tier3_block_after_tier2_block():
     assert tier2_end < begin < key_pos < end
     # Not nested: no other marker sits between this block's BEGIN and END.
     assert "# TIER:" not in text[begin + len("# TIER:3 BEGIN"):end]
+
+
+@pytest.mark.parametrize("key,value,ok", [
+    ("SCHEDULE_RESEARCH_TIME", "00:00", True),
+    ("SCHEDULE_RESEARCH_TIME", "05:29", True),
+    ("SCHEDULE_RESEARCH_TIME", "05:30", False),
+    ("SCHEDULE_RESEARCH_TIME", "22:00", False),
+    ("SCHEDULE_RESEARCH_TIME", "midnight", False),
+    ("SCHEDULE_NIGHTLY_SCAN_TIME", "22:00", True),
+    ("SCHEDULE_NIGHTLY_SCAN_TIME", "25:00", False),
+    ("OLLAMA_BASE_URL", "anything goes", True),
+])
+def test_schedule_settings_are_validated(key, value, ok):
+    from web import credentials as creds
+    assert (creds.validate_setting_value(key, value) is None) is ok

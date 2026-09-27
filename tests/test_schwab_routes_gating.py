@@ -15,6 +15,7 @@ import pytest
 
 import web.features as features
 import web.main as main_module
+from tests._route_paths import app_route_paths
 
 _SCHWAB_PATHS = {
     "/api/auth/schwab",
@@ -32,7 +33,7 @@ def app_paths(monkeypatch):
             monkeypatch.setenv(k, v)
         importlib.reload(features)
         importlib.reload(main_module)
-        return {r.path for r in main_module.app.routes if hasattr(r, "path")}
+        return app_route_paths(main_module.app)
 
     yield _load
     # Leave web.main.app back at the physical default tier for any test that
