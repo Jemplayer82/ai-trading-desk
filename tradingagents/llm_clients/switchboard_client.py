@@ -114,6 +114,21 @@ def _format_tools(tools: list) -> list[dict]:
 # SwitchboardChatModel — LangChain BaseChatModel backed by the bus
 # ---------------------------------------------------------------------------
 
+def is_chatgpt_model(model_name: str | None) -> bool:
+    """True for the ChatGPT models the Codex handler serves.
+
+    ``chatgpt`` is the always-latest entry in the switchboard menus;
+    ``chatgpt:<model-id>`` pins one through Custom model ID.
+    """
+    name = (model_name or "").strip().lower()
+    return name == "chatgpt" or name.startswith("chatgpt:")
+
+
+def chatgpt_agent_id() -> str:
+    """Bus agent that answers ChatGPT requests (scripts/codex_llm_handler.py)."""
+    return os.environ.get("SWITCHBOARD_CHATGPT_AGENT", "").strip() or "codex"
+
+
 class SwitchboardChatModel(BaseChatModel):
     """Routes .invoke() calls through the mcp-switchboard bus.
 
@@ -144,6 +159,10 @@ class SwitchboardChatModel(BaseChatModel):
                 data["target_agent_id"] = env_agent
         if not data.get("provider"):
             data["provider"] = os.environ.get("SWITCHBOARD_PROVIDER", "")
+        # ChatGPT models are answered by the Codex handler, not the default
+        # (Claude) handler, so one analysis can mix Claude and ChatGPT roles.
+        if is_chatgpt_model(data.get("model_name")):
+            data["target_agent_id"] = chatgpt_agent_id()
         super().__init__(**data)
 
     @property

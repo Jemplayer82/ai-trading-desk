@@ -704,9 +704,14 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
 # Request handler
 # ---------------------------------------------------------------------------
 
-def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
+def handle_request(msg: dict, url: str, token: str, agent_id: str,
+                   backend=None, default_model: str | None = None) -> None:
+    """Serve one llm_request. ``backend`` defaults to call_claude_streaming; the
+    Codex handler (scripts/codex_llm_handler.py) passes its own generator with
+    the same (model, system, messages, tools, max_tokens) signature."""
+    backend = backend or call_claude_streaming
     req = json.loads(msg["content"])
-    model = req.get("model") or DEFAULT_MODEL
+    model = req.get("model") or default_model or DEFAULT_MODEL
     system = req.get("system") or ""
     messages = req.get("messages") or []
     tools = req.get("tools") or []
@@ -731,7 +736,7 @@ def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
         })
 
     tool_calls: list = []
-    for chunk in call_claude_streaming(model, system, messages, tools, max_tokens):
+    for chunk in backend(model, system, messages, tools, max_tokens):
         if "delta" in chunk:
             # Best-effort: a transient bus hiccup on one delta must not tear down
             # an otherwise-healthy stream (and orphan the live claude subprocess).
@@ -784,10 +789,11 @@ def _acquire_single_instance_lock(agent_id: str) -> None:
     _INSTANCE_LOCK = lock_file  # keep the fd alive for the process lifetime
 
 
-def main() -> None:
+def main(backend=None, display_name: str = "Cleo (Claude daemon)",
+         default_agent_id: str = "cleo", default_model: str | None = None) -> None:
     url = os.environ["SWITCHBOARD_URL"]
     token = os.environ["SWITCHBOARD_MCP_TOKEN"]  # pragma: allowlist secret
-    agent_id = os.environ.get("SWITCHBOARD_AGENT_ID", "cleo")
+    agent_id = os.environ.get("SWITCHBOARD_AGENT_ID", default_agent_id)
 
     _acquire_single_instance_lock(agent_id)
 
@@ -832,7 +838,7 @@ def main() -> None:
     while True:
         if not registered:
             try:
-                bus("register_agent", {"agent_id": agent_id, "name": "Cleo (Claude daemon)"})
+                bus("register_agent", {"agent_id": agent_id, "name": display_name})
                 bus("set_status", {"agent_id": agent_id, "activity": "ready"})
                 log.info("registered as '%s' — waiting for llm_request DMs", agent_id)
                 registered = True
@@ -859,7 +865,8 @@ def main() -> None:
                             f"Cleo is at capacity ({MAX_INFLIGHT} requests in "
                             f"flight); try again shortly")
                 continue
-            executor.submit(_dispatch, msg, url, token, agent_id, inflight)
+            executor.submit(_dispatch, msg, url, token, agent_id, inflight,
+                            backend, default_model)
 
 
 def _send_error(msg: dict, url: str, token: str, agent_id: str, error: str) -> None:
@@ -878,9 +885,10 @@ def _send_error(msg: dict, url: str, token: str, agent_id: str, error: str) -> N
 
 
 def _dispatch(msg: dict, url: str, token: str, agent_id: str,
-              inflight: threading.BoundedSemaphore | None = None) -> None:
+              inflight: threading.BoundedSemaphore | None = None,
+              backend=None, default_model: str | None = None) -> None:
     try:
-        handle_request(msg, url, token, agent_id)
+        handle_request(msg, url, token, agent_id, backend=backend, default_model=default_model)
     except Exception as exc:
         log.exception("Error handling message %s", msg.get("id"))
         _send_error(msg, url, token, agent_id, str(exc))

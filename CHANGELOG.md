@@ -8,6 +8,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **ChatGPT via the switchboard.** New `scripts/codex_llm_handler.py` (deploy notes in
+  `deploy/codex/`) answers `llm_request`s with `codex exec` on the host's ChatGPT
+  sign-in, locked down (no shell/browser/apps, read-only sandbox, empty temp dir).
+  The switchboard menus gain `chatgpt` (always the Codex CLI's current default
+  model) in both roles; requests for `chatgpt*` route to `SWITCHBOARD_CHATGPT_AGENT`
+  (default `codex`) while other models stay on Cleo, so quick and deep can use
+  different subscriptions.
+
+### Changed
+- **Switchboard menus are always-latest only.** Pinned Claude snapshots were
+  removed; the menus offer `sonnet`, `opus`, `fable` (deep only) and `chatgpt`.
+  Pin a snapshot through Custom model ID.
+
 ### Changed — shared daily research
 
 - **One shared research scan per trading day.** A single `kind='research'`

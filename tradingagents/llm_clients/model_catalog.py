@@ -227,6 +227,13 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # web/runner.py::_catalog_default takes the first non-"custom" entry.
     # To pin a specific snapshot anyway, type its ID into "Custom model ID".
     #
+    # "chatgpt" is answered by a different bus agent: the Codex handler
+    # (scripts/codex_llm_handler.py, agent id SWITCHBOARD_CHATGPT_AGENT, default
+    # "codex"), which runs `codex exec` on the host's ChatGPT sign-in. It means
+    # the Codex CLI's current default model, i.e. always the latest; pin one
+    # with Custom model ID "chatgpt:<model-id>". Routing is per model, so the
+    # quick and deep roles can use different handlers.
+    #
     # The tradeoff: an always-latest name means the model under your analysis
     # changes the day Anthropic ships the next one, with no commit and no
     # warning. That is what these menus now choose deliberately; anything that
@@ -292,6 +299,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
         "quick": [
             ("Sonnet — latest (via bus)", "sonnet"),
             ("Opus — latest, slower (via bus)", "opus"),
+            ("ChatGPT — latest (via bus, Codex handler)", "chatgpt"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
         ],
@@ -299,6 +307,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Opus — latest (via bus)", "opus"),
             ("Fable — latest, most capable, slowest (via bus)", "fable"),
             ("Sonnet — latest, faster (via bus)", "sonnet"),
+            ("ChatGPT — latest (via bus, Codex handler)", "chatgpt"),
             ("Custom model ID", "custom"),
         ],
     },

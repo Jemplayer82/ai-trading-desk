@@ -110,6 +110,7 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},  # pragma: allowlist secret
     {"key": "OLLAMA_MAX_CONCURRENCY", "label": "Max concurrent LLM analyses", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Shared concurrency budget across single-ticker analyses and (T3+) the S&P 500 scanner (default 3, floor 1)."},
     {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or 'cleo' (your local free claude -p session)"},  # pragma: allowlist secret
+    {"key": "SWITCHBOARD_CHATGPT_AGENT", "label": "Switchboard — ChatGPT handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers the 'chatgpt' models (scripts/codex_llm_handler.py); blank uses 'codex'"},  # pragma: allowlist secret
     # Email / alerts + newsletter — SMTP/FRED_NOTIFY_URL are T1 (run-failure
     # alerts fire for single-ticker analyses too, see web/alerts.py +
     # web/mailer.py); NEWSLETTER_* only matter once the T2 morning newsletter

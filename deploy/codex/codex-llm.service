@@ -1,0 +1,22 @@
+[Unit]
+Description=Codex — ChatGPT (Codex CLI) LLM daemon for TradingAgents switchboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=landon
+WorkingDirectory=/home/landon/codex-llm
+# Same SWITCHBOARD_URL / SWITCHBOARD_MCP_TOKEN as Cleo, plus SWITCHBOARD_AGENT_ID=codex.
+EnvironmentFile=/etc/codex-llm/codex-llm.env
+ExecStart=/usr/bin/python3 /home/landon/codex-llm/codex_llm_handler.py
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+NoNewPrivileges=true
+MemoryAccounting=yes
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
