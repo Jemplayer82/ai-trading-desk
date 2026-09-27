@@ -21,8 +21,8 @@
 > For research and educational purposes only. Trading performance varies with the chosen models, data quality, and market conditions. This is not financial, investment, or trading advice.
 
 <!-- TIER-IDENTITY BEGIN -->
-> **This branch: `master` — Tier 4 — Full: + daily options paper trading (the complete product).**
-> Development happens here. The reduced tiers are published as generated branches — see the tier table below.
+> **This branch: `tier-1-base` — Tier 1 — Base: single-ticker AI analysis.**
+> **GENERATED BRANCH — do not commit here.** Regenerated from `master` by `scripts/make_tier.py` (driven by `.github/workflows/tiers.yml`); the next regeneration force-pushes over this branch and your commit is gone. Develop on `master`.
 <!-- TIER-IDENTITY END -->
 
 ---
@@ -52,15 +52,6 @@ produced by `scripts/make_tier.py` and force-pushed by
 
 This project runs a team of specialized LLM agents that mirror the desks of a real trading firm — analysts, researchers, a trader, and a risk/portfolio manager — and surfaces the whole pipeline in a real-time web dashboard. Submit a ticker and watch each agent stream its reasoning, ending in a BUY / SELL / HOLD decision with full reports.
 
-<!-- TIER:2 BEGIN -->
-Connect a Schwab account to scan a live portfolio, with a nightly sweep of every holding and a morning briefing in your inbox.
-<!-- TIER:2 END -->
-<!-- TIER:3 BEGIN -->
-Let the scheduler research the S&P 500 every trading day (a shared 00:00 ET pass), deep-dive the highest-conviction names, and rebalance a $100k paper portfolio on its own after the open.
-<!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-Turn on the daily options paper trader, which hunts S&P 500 movers every weekday and trades long calls and puts under hard risk guardrails, grading its own closed trades to learn from them.
-<!-- TIER:4 END -->
 
 The project ships as container images and deploys as a Portainer edge stack, backed by FastAPI services and a SQLite database. The repository is **self-contained** — the underlying TradingAgents agent framework is vendored in directly, so everything needed to build and run the dashboard lives in this repo with no dependency on the upstream project.
 
@@ -90,15 +81,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Terminal-aesthetic UI with dark theme and color-coded signals
 - Tabbed interface:
   - **Run Analysis** — submit a ticker, watch the agents work
-  <!-- TIER:2 BEGIN -->
-  - **Portfolio Scan** — your live Schwab holdings, analyzed
-  <!-- TIER:2 END -->
-  <!-- TIER:3 BEGIN -->
-  - **S&P 500** — the daily market-wide research and paper portfolio
-  <!-- TIER:3 END -->
-  <!-- TIER:4 BEGIN -->
-  - **Options** — the daily options paper trader
-  <!-- TIER:4 END -->
   - **Settings** — provider keys, app settings, and users
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
@@ -107,17 +89,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 **Automation**
 - Background job scheduler (APScheduler with cron expressions) running the jobs for whichever features this tier enables
-<!-- TIER:2 BEGIN -->
-- Schwab OAuth integration for brokerage account scanning
-- Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
-- Automated nightly portfolio analysis of all holdings, emailed as a morning briefing
-<!-- TIER:2 END -->
-<!-- TIER:3 BEGIN -->
-- Shared daily S&P 500 research at 00:00 ET (pre-screen all ~500 tickers, quick scan top 150 + SPY, deep-dive top 50 + SPY) feeding a daily $100k paper portfolio allocation
-<!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-- Daily options paper trader (pre-screen the whole S&P 500 → quick scan top 150 + SPY → deep-dive top 50 directional + SPY → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
-<!-- TIER:4 END -->
 
 **Provider & Credential Management**
 - Ollama Cloud as the deployed default backend, with 14+ LLM providers supported (OpenAI, Anthropic, Google, xAI, DeepSeek, Qwen, GLM, MiniMax, OpenRouter, Azure, Ollama, Mistral, custom)
@@ -132,12 +103,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - SQLite with WAL mode for concurrent access and persistence
 - Deployed as a Portainer edge stack; images built and pushed to `ghcr.io` by GitHub Actions CI
 
-<!-- TIER:2 BEGIN -->
-**Companion: [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp)**
-- Containerized Node.js MCP server that gives the dashboard a direct, real-time connection to your Schwab brokerage account
-- Enables the dashboard to query live quotes, account positions, orders, and transaction history straight from Schwab
-- Optional — a settings checkbox switches between the MCP server and the built-in data collection method
-<!-- TIER:2 END -->
 
 ---
 
@@ -161,13 +126,6 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 *Every analyst, the Research and Risk teams, the Trader, and the Portfolio Manager complete in sequence, producing a final decision and a scaling / risk-management strategy.*
 
-<!-- TIER:3 BEGIN -->
-### S&P 500 Scanner
-
-![S&P 500 scanner with $100k paper portfolio](assets/screenshot-spy-scanner.jpg)
-
-*A shared 00:00 ET research pass pre-screens all ~500 tickers and deep-dives the top 50 by conviction; each paper account then allocates its $100k paper portfolio from that research at its own configurable time (default 09:00 ET, set in the account modal), filling at live quotes after 09:35 ET, with live performance tracking.*
-<!-- TIER:3 END -->
 
 ---
 
@@ -226,11 +184,6 @@ $ export OLLAMA_BASE_URL=https://ollama.com/v1
 # Analysis API
 $ uvicorn web.main:app --reload --port 8000
 
-# TIER:2 BEGIN
-# Scan API (separate process)
-$ uvicorn web.portfolio_main:app --reload --port 8001
-
-# TIER:2 END
 # Scheduler (this tier's cron jobs)
 $ python -m web.scheduler
 ```
@@ -254,64 +207,9 @@ Single-ticker deep analysis with real-time streaming:
 
 > **Aggressiveness vs. bias.** *Aggressiveness* (1–10) controls how much risk the run takes — it sets debate depth (1–3 → 1 round, 4–7 → 2, 8–10 → 3). *Decision bias* (bullish / neutral / bearish) nudges the stance the agents lean toward on borderline calls — a suggestion, not a hard limit. The two are **independent**: aggressiveness = *how much*, bias = *which way*. Both are available wherever an analysis or scan can be launched.
 
-<!-- TIER:3 BEGIN -->
-> **Sizing.** In the equity paper portfolio, aggressiveness also drives position sizing: ≤3 → max 7% per position / 20% cash · 4–7 → 12% / 10% · 8–10 → 20% / 5%.
-<!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-> **Options sizing.** For options paper accounts: ≤3 → max 5% premium per position / 15% total at risk · 4–7 → 8% / 30% · 8–10 → 12% / 50%.
-<!-- TIER:4 END -->
 
-<!-- TIER:2 BEGIN -->
-### Schwab Tab
 
-Connect your Charles Schwab account via OAuth 2.0 to enable automated portfolio scanning. Tokens are stored securely and refresh automatically.
 
-**Data source toggle.** A checkbox in settings lets you choose how account and market data is collected:
-
-- **Schwab MCP server** *(checked)* — Routes all Schwab requests through the [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) server for live quotes, positions, orders, and transaction history.
-- **Built-in method** *(unchecked)* — Uses the dashboard's own market-data retrieval (yfinance) and does not connect to Schwab at all.
-
-When the MCP server is enabled, account positions and market data come directly from your Schwab brokerage account; the built-in method instead pulls public market data via yfinance.
-
-### Portfolio Scan Tab
-
-Run and review scans of your real Schwab holdings:
-
-- **Run Scan Now** — kick off an on-demand scan with its own **aggressiveness** + **decision bias** (the nightly cron time is configurable in the Run Scan Now box (default 22:00 ET) and runs with defaults)
-- Aggregated portfolio briefing
-- Per-ticker analysis cards with signals and rationales
-- Links to full detailed analyses
-<!-- TIER:2 END -->
-
-<!-- TIER:3 BEGIN -->
-### S&P 500 Tab
-
-Daily paper portfolio built from one shared research pass per NYSE trading day:
-
-- **Research (00:00 ET, shared)** — momentum/volume pre-screen ranks all ~500 S&P 500 tickers; the top 150 + SPY get the quick LLM scan and the top 50 BUY/SELL names + SPY get the full multi-agent deep dive. One automatic retry runs before 05:30 ET; if the research still fails, accounts skip the day
-- **Allocation (per account, default 09:00 ET)** — each account's allocation waits for that day's research, then for the 09:35 ET open, and builds or rebalances its $100k portfolio at live quotes with position sizing
-- **Low churn** — the daily allocator keeps existing holdings by default and only trades on a real change in conviction
-
-Each account's allocation time is configurable in the account modal, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking. Hourly price refreshes also enforce that account's configured stop policy (none / stop / stop-limit / trailing % / trailing $) against its paper positions, booking a simulated exit into the snapshot with its realized P&L — simulated only, the app never places a real order.
-<!-- TIER:3 END -->
-
-<!-- TIER:4 BEGIN -->
-### Options Tab
-
-Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every trading day:
-
-- **Shared research (00:00 ET)** — one research pass per trading day, shared with the S&P tab: momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
-- **Per-account allocation time (default 09:00 ET)** — each account allocates from that day's research at its own configurable time
-- **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
-- **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
-- **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 unconditionally, while the stop is now the account's configured policy (none / stop / stop-limit / trailing % / trailing $), backfilled to a 60% stop for existing options accounts, per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
-- **Hourly marks** (10:00–16:00 + 16:45 ET) enforce the account's own stop policy intraday like standing orders, booked at the minute the level was crossed: a level crossed during the interval fills **at** the level, a gap straight through fills at the observed quote, and a **stop-limit** that gaps below its limit price rests until a later refresh quotes back at or above it. Stale/carried marks never trigger, and `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false` disables the whole intraday pass regardless of any account's policy. A **20:00 ET expiry settlement** sweep models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
-- **20:15 ET learning pass** — deep-dive directional calls are graded nightly against the underlying's forward alpha (the shared memory log), and every closed position gets a directional-vs-decay P&L attribution; once enough closes accumulate, a nightly batch reflection distills "watch for …" lessons that are injected into the next allocator run as context (hard risk limits are never relaxed by lessons)
-
-Unlike the S&P tab's daily snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
-
-The tab also has an on-demand **Ticker Recommendation** box: type any ticker and get a specific contract pick with confidence (1–10), entry/target/stop premiums, horizon, thesis and risks. It runs the same momentum quick-read and contract-vetting pipeline as the daily scan, vets **both** the call and the put, and the advisor is briefed with the system's graded decision history and its own options lessons — every recommendation is itself stored and graded by the nightly learning sweep. Advisory only; nothing is traded.
-<!-- TIER:4 END -->
 
 ### Credentials Tab
 
@@ -495,31 +393,6 @@ The dashboard handles these automatically — tokens appear in each agent's repo
 
 ---
 
-<!-- TIER:2 BEGIN -->
-## `[ schwab mcp ]`
-
-[**schwab-mcp**](https://github.com/Jemplayer82/schwab-mcp) is a companion containerized Node.js MCP server that gives this dashboard a direct, real-time connection to your Schwab brokerage account. Rather than relying on manual data exports or delayed feeds, the dashboard communicates with Schwab through schwab-mcp to pull live quotes, account positions, open orders, and transaction history — enabling the scans and OAuth token management to work seamlessly.
-
-Using schwab-mcp is optional. A checkbox in the Schwab settings lets you switch between the MCP server and the dashboard's built-in data collection method.
-
-| Tool | Description |
-|------|-------------|
-| `get_quotes` | Real-time quote data for one or more symbols |
-| `get_accounts` | Account balances and positions |
-| `get_orders` | Open and historical orders |
-| `place_order` | Submit equity orders |
-| `get_transactions` | Account transaction history |
-| `get_market_hours` | Market open/close status |
-
-```bash
-$ docker run -p 3000:3000 \
-    -e SCHWAB_CLIENT_ID=your_client_id \
-    -e SCHWAB_CLIENT_SECRET=your_secret \
-    ghcr.io/jemplayer82/schwab-mcp:latest
-```
-
-See [Jemplayer82/schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) for full setup and MCP client configuration.
-<!-- TIER:2 END -->
 
 ---
 
@@ -529,19 +402,12 @@ Where market, indicator, and account data come from:
 
 - **yfinance** — default price/OHLCV plus locally-computed technical indicators (via `stockstats`). Built-in, free, no key.
 - **Alpha Vantage** — *optional* pre-calculated technical indicators (SMA/EMA/MACD/RSI/Bollinger/ATR). Set **Technical indicators source** to `alpha_vantage` and add `ALPHA_VANTAGE_API_KEY`.
-<!-- TIER:2 BEGIN -->
-- **Schwab MCP** — live holdings/positions plus OHLCV quotes, feeding the local indicator calculation when **Use Schwab for market data** is on. Wired via OAuth + [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp).
-- **Alpaca** — ⚠️ **not implemented.** Credential fields exist in Settings, but there is **no** Alpaca holdings/quote/trade integration in the codebase yet; saving keys does nothing functional. Schwab is the only wired brokerage.
-<!-- TIER:2 END -->
 
 **Technical indicators source** (Settings → Market Data) picks the indicator vendor:
 
 - `yfinance` *(default)* — indicators computed locally with `stockstats`. No key needed.
 - `alpha_vantage` — indicators come pre-calculated from Alpha Vantage (requires `ALPHA_VANTAGE_API_KEY`).
 
-<!-- TIER:2 BEGIN -->
-> Schwab is an **OHLCV source**, not a pre-calculated-indicator source — it feeds the local `stockstats` calculation rather than returning ready-made indicators.
-<!-- TIER:2 END -->
 
 ---
 
@@ -562,12 +428,6 @@ Portainer Edge Stack
 │    single-ticker analysis · chart data · Q&A · Agent Bus
 │    └─ depends_on switchboard
 │
-# TIER:2 BEGIN
-├─ tradingagents-portfolio   ghcr.io/jemplayer82/tradingagents       (FastAPI · web.portfolio_main:app · :8000)
-│    scan backend  (isolated so long scans don't block ad-hoc analysis)
-│    └─ depends_on tradingagents-api
-│
-# TIER:2 END
 ├─ tradingagents-scheduler   ghcr.io/jemplayer82/tradingagents       (APScheduler · web.scheduler)
 │    this tier's cron jobs
 │
@@ -590,15 +450,6 @@ Every FastAPI and CLI role shares **one image** (`tradingagents`) with different
 - **Preferences** — user settings (LLM provider, models, language, analysts, research depth)
 - **Analyses** — single-ticker runs with reports and signals (BUY/SELL/HOLD)
 - **Provider Credentials** — API keys (encrypted, masked in UI)
-<!-- TIER:2 BEGIN -->
-- **Portfolio Scans** — batch analysis of Schwab holdings
-<!-- TIER:2 END -->
-<!-- TIER:3 BEGIN -->
-- **S&P 500 Scans** — multi-phase SPX analysis with portfolio allocations
-<!-- TIER:3 END -->
-<!-- TIER:4 BEGIN -->
-- **Options Positions & Ledger** — per-contract paper positions, cash ledger, and graded lessons
-<!-- TIER:4 END -->
 
 ---
 
@@ -612,12 +463,6 @@ TRADINGAGENTS_WEB_DB=/home/appuser/.tradingagents/web.db
 OLLAMA_API_KEY=your_key
 OLLAMA_BASE_URL=https://ollama.com/v1
 
-# TIER:2 BEGIN
-# Schwab OAuth
-SCHWAB_APP_KEY=your_app_key
-SCHWAB_APP_SECRET=your_app_secret
-SCHWAB_CALLBACK_URL=https://your-host/api/auth/schwab/callback
-# TIER:2 END
 TOKEN_ENCRYPTION_KEY=<base64-32-bytes>
 
 # Agent Bus (switchboard container)
@@ -628,22 +473,6 @@ BUS_MIRROR=analysis
 SCHEDULER_TIMEZONE=America/New_York
 DASHBOARD_URL=https://your-dashboard-host
 
-# TIER:2 BEGIN
-# Morning newsletter + alert email
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=...
-SMTP_PASS=...
-NEWSLETTER_FROM=...
-NEWSLETTER_TO=...
-
-# TIER:2 END
-# TIER:4 BEGIN
-# Options learning loop (optional overrides; sensible defaults built in)
-TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS=true   # kill switch: scan deep dives feeding the memory log
-TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED=10    # min closed positions before stats reach the allocator
-TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED=5 # min NEW closes before a nightly reflection fires
-# TIER:4 END
 ```
 
 > [!IMPORTANT]
@@ -686,34 +515,12 @@ ai-trading-desk/
 │   ├── db.py               # SQLite schema
 │   ├── credentials.py      # API key management
 │   ├── llm_helpers.py      # Multi-provider LLM abstraction
-# TIER:2 BEGIN
-│   ├── portfolio_main.py   # tradingagents-portfolio — scan API shell
-│   ├── portfolio_routes.py # portfolio scan routes + worker
-# TIER:2 END
-# TIER:3 BEGIN
-│   ├── spy_scanner.py      # S&P 500 3-phase scanner
-│   ├── spy_allocator.py    # $100k portfolio builder
-│   ├── research_engine.py  # shared daily S&P 500 research
-# TIER:3 END
-# TIER:4 BEGIN
-│   ├── options_engine.py   # per-account options allocation
-│   ├── options_learning.py # closed-trade grading + lessons
-# TIER:4 END
 │   ├── bus.py              # Switchboard MCP client + resilient publisher
 │   ├── bus_mirror.py       # Mirror agent handoffs onto the Agent Bus
 │   └── static/             # SPA files (served by nginx)
 │       ├── index.html
 │       ├── app.js
 │       ├── bus.js          # Agent Bus WebSocket client + live feed panel
-# TIER:2 BEGIN
-│       ├── portfolio.js
-# TIER:2 END
-# TIER:3 BEGIN
-│       ├── spy.js
-# TIER:3 END
-# TIER:4 BEGIN
-│       ├── options.js
-# TIER:4 END
 │       ├── credentials.js
 │       └── styles.css
 ├── scripts/make_tier.py    # generates the tier branches from master
@@ -738,21 +545,7 @@ Legacy cached OHLCV CSV files have an `index` column instead of `Date`. Code nor
 $ rm -rf ~/.tradingagents/cache/*.csv
 ```
 
-<!-- TIER:2 BEGIN -->
-### Schwab scan doesn't start
 
-OAuth token not saved or expired. Click "Connect to Schwab" in the Schwab tab and complete the OAuth flow.
-<!-- TIER:2 END -->
-
-<!-- TIER:3 BEGIN -->
-### S&P 500 scan hangs
-
-Check the portfolio backend logs and verify the Ollama Cloud key:
-
-```bash
-$ docker logs tradingagents-portfolio
-```
-<!-- TIER:3 END -->
 
 ### API key not taking effect
 

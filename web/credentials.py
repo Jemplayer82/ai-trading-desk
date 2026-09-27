@@ -123,30 +123,6 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "NEWSLETTER_TO", "label": "Newsletter To", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "recipient@example.com"},
     # Notifications
     {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},  # pragma: allowlist secret
-    # TIER:2 BEGIN
-    # Automation schedule — time-of-day for the nightly Schwab portfolio scan
-    # (Mon-Fri, SCHEDULER_TIMEZONE). Read at reconcile time by web/scheduler.py,
-    # so a change takes effect within ~60s with no container restart. Per-paper-
-    # account scan times live on paper_accounts.schedule_time instead.
-    {"key": "SCHEDULE_NIGHTLY_SCAN_TIME", "label": "Nightly portfolio scan time (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "22:00 — 24-hour HH:MM, Mon-Fri; blank uses 22:00"},  # pragma: allowlist secret
-    # Brokerage (Schwab) — data-source switch
-    {"key": "SCHWAB_ENABLED", "label": "Data source — Schwab MCP (on) vs free built-in tools (off)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab", "off_label": "Off — free / yfinance", "placeholder": "on = Schwab holdings + market data; off hides holdings and uses free yfinance"},
-    # Brokerage (Schwab OAuth app credentials)
-    {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},  # pragma: allowlist secret
-    {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},  # pragma: allowlist secret
-    {"key": "SCHWAB_CALLBACK_URL", "label": "Schwab Callback URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "https://trading.txferguson.net/api/auth/schwab/callback"},
-    {"key": "SCHWAB_MCP_URL", "label": "Schwab MCP URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "http://100.112.40.124:3105/mcp"},
-    {"key": "SCHWAB_MARKET_DATA", "label": "Use Schwab for market data (off = free yfinance)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab quotes", "off_label": "Off — yfinance", "placeholder": ""},
-    # Brokerage (Alpaca) — credential fields stored, no live holdings integration yet
-    {"key": "ALPACA_ENABLED", "label": "Alpaca (credential fields only — holdings not yet wired)", "group": "Brokerage (Alpaca)", "secret": False, "type": "toggle", "on_label": "On", "off_label": "Off", "placeholder": ""},
-    {"key": "ALPACA_API_KEY", "label": "Alpaca API Key", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API key ID from alpaca.markets"},  # pragma: allowlist secret
-    {"key": "ALPACA_API_SECRET", "label": "Alpaca API Secret", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API secret"},  # pragma: allowlist secret
-    {"key": "ALPACA_BASE_URL", "label": "Alpaca Base URL", "group": "Brokerage (Alpaca)", "secret": False, "placeholder": "https://api.alpaca.markets"},
-    # TIER:2 END
-    # TIER:3 BEGIN
-    # Shared daily research start time (Mon-Fri, SCHEDULER_TIMEZONE); read at reconcile time by web/scheduler.py research_time(), so edits apply within ~60 s.
-    {"key": "SCHEDULE_RESEARCH_TIME", "label": "Daily shared research start (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "00:00 — Mon-Fri, must be before 05:30 (runs for that same day); the one research pass every paper account allocates from"},  # pragma: allowlist secret
-    # TIER:3 END
 ]
 
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}

@@ -26,16 +26,11 @@ services:
     pull_policy: always
     entrypoint: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      TIER: ${TIER:-4}
+      TIER: ${TIER:-1}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
-      # TIER:2 BEGIN
-      SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
-      SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
-      SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
-      # TIER:2 END
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
@@ -50,64 +45,6 @@ services:
     depends_on:
       - switchboard
 
-  # TIER:2 BEGIN
-  # Portfolio scan backend — separate container so long scans don't block ad-hoc.
-  # Only exists from tier 2 up; at tier 2/3/4 it's the SAME image/entrypoint,
-  # differing only in which route modules TIER makes it mount at runtime (see
-  # web/features.py, web/portfolio_main.py).
-  # mem_limit + reduced scan concurrency: the host is a 11.5 GB VM already ~67%
-  # full at idle across 33 containers, so a large options quick-scan's memory
-  # growth used to tip it into a HOST-level OOM that SIGKILLed this process with
-  # no traceback (RestartCount climbing, scans reaped as "abandoned"). The cgroup
-  # limit both protects the other containers from a host-wide OOM and makes any
-  # future breach diagnosable (OOMKilled=true) instead of an invisible host kill.
-  tradingagents-portfolio:
-    image: ghcr.io/jemplayer82/tradingagents:latest
-    pull_policy: always
-    entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
-    mem_limit: 4g
-    environment:
-      TIER: ${TIER:-4}
-      LLM_PROVIDER: ollama
-      TRADINGAGENTS_LLM_PROVIDER: ollama
-      # Deep-dive LLM-call concurrency budget (web/spy_scanner.py _total_budget()).
-      # It sets the DynamicGate capacity that caps concurrent LLM invokes during a
-      # scan; the ThreadPoolExecutor pool width tracks this same value 1:1 unless
-      # DEEP_DIVE_POOL_MULTIPLIER is explicitly raised (see below — off by
-      # default, so this value alone still bounds both). Dropped to 3 during the
-      # host OOM crisis (WebServer had ~424MB free); raised back to 8 once the
-      # host recovered (~14GB free); 8 also matches Cleo's own
-      # ThreadPoolExecutor(max_workers=8) ceiling (scripts/cleo_llm_handler.py),
-      # so the scan-side gate no longer throttles below what Cleo can serve.
-      OLLAMA_MAX_CONCURRENCY: "8"
-      # Kill switch for per-LLM-call deep-dive gating (web/spy_scanner.py::
-      # _per_call_gating_enabled). Set to "0" to restore one gate permit per
-      # whole dive instead of one per individual LLM call. This does NOT widen
-      # the worker pool by itself — pool width is controlled independently by
-      # DEEP_DIVE_POOL_MULTIPLIER (unset here, defaults to 1 = no widening,
-      # i.e. pool width == OLLAMA_MAX_CONCURRENCY). The two were deliberately
-      # decoupled: per-call gating alone is memory-cheap, but widening the pool
-      # multiplies peak concurrent dives and this container has prior
-      # host-level OOM history under its 4g mem_limit, so that throughput bet
-      # is a separate, explicit opt-in an operator can raise if they want it.
-      DEEP_DIVE_PER_CALL_GATING: "1"
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
-      SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
-      SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
-      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
-      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
-      SWITCHBOARD_URL: http://switchboard:3107
-      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
-      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
-      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
-    volumes:
-      - tradingagents_data:/home/appuser/.tradingagents
-    restart: unless-stopped
-    depends_on:
-      - tradingagents-api
-  # TIER:2 END
 
   # Cron daemon — fires nightly scan + 5am newsletter + hourly token health.
   tradingagents-scheduler:
@@ -115,7 +52,7 @@ services:
     pull_policy: always
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
-      TIER: ${TIER:-4}
+      TIER: ${TIER:-1}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}
@@ -143,9 +80,6 @@ services:
     restart: unless-stopped
     depends_on:
       - tradingagents-api
-      # TIER:2 BEGIN
-      - tradingagents-portfolio
-      # TIER:2 END
 
   # Pure nginx frontend — no secrets, just static files + reverse proxy.
   tradingagents-web:
@@ -156,9 +90,6 @@ services:
     restart: unless-stopped
     depends_on:
       - tradingagents-api
-      # TIER:2 BEGIN
-      - tradingagents-portfolio
-      # TIER:2 END
 
   # Agent message bus — the dashboard streams it via /api/bus, AND it's exposed
   # on host port 3109 so an external Claude CLI (or other off-stack agent) can
