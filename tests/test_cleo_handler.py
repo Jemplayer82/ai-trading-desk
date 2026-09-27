@@ -289,3 +289,26 @@ def test_ordinary_prose_produces_no_calls_and_no_error_log(cleo, caplog):
     with caplog.at_level(logging.ERROR):
         assert cleo._parse_tool_calls("SPY closed at 512.30, up 0.4% on the session.") == []
     assert not caplog.records
+
+
+def test_claude_command_skips_interactive_user_setup(cleo, monkeypatch):
+    """Background calls must not load the user's hooks, plugins, skills or memory."""
+    import json as _json
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _popen(cmd, **kwargs):
+        seen["cmd"] = cmd
+        raise _Stop()
+
+    monkeypatch.setattr(cleo.subprocess, "Popen", _popen)
+    with pytest.raises(_Stop):
+        next(cleo.call_claude_streaming("sonnet", "sys", [{"role": "user", "content": "hi"}], [], 100))
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
+    assert "--disable-slash-commands" in cmd
+    settings = _json.loads(cmd[cmd.index("--settings") + 1])
+    assert settings == {"autoMemoryEnabled": False, "effortLevel": "high"}
+    assert cmd[cmd.index("--tools") + 1] == ""

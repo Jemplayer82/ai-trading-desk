@@ -556,6 +556,15 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
         "--verbose",
         "--include-partial-messages",
         "--no-session-persistence",
+        # Background calls must not load the interactive user setup: skip user/
+        # project/local settings (hooks, plugins, statusline), skills and
+        # auto-memory. Before 2026-09-26 every call on WebServer ran 5 hooks
+        # (GSD update/state, switchboard digest x2 injecting the inbox into
+        # context, publish) and carried ~3.4k tokens of overhead; now ~0.5k.
+        # Effort stays "high" to match the user setting it used to inherit.
+        "--setting-sources", "",
+        "--disable-slash-commands",
+        "--settings", json.dumps({"autoMemoryEnabled": False, "effortLevel": "high"}),
         "--tools", "",            # disable built-in Claude Code tools
         "--model", model,
     ]
