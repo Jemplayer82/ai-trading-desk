@@ -629,13 +629,27 @@ function optOpenTotalsHtml(positions, summary) {
   const valueOf = (p) => (p.current_value != null ? Number(p.current_value) : costOf(p));
   const openCost = positions.reduce((t, p) => t + costOf(p), 0);
   const openValue = positions.reduce((t, p) => t + valueOf(p), 0);
-  const openPct = openCost > 0 ? (openValue / openCost - 1) * 100 : null;
+  const bookPct = openCost > 0 ? (openValue / openCost - 1) * 100 : null;
+  // Average of the P&L column: the same per-contract % each row shows
+  // (mark vs entry premium), over the rows that have a mark.
+  const rowPcts = positions
+    .map((p) => {
+      const entry = Number(p.entry_premium) || 0;
+      const mark = p.current_premium != null ? Number(p.current_premium) : null;
+      return mark != null && entry > 0 ? (mark / entry - 1) * 100 : null;
+    })
+    .filter((v) => v != null);
+  const avgPct = rowPcts.length ? rowPcts.reduce((t, v) => t + v, 0) / rowPcts.length : null;
+  const bookNote = bookPct != null
+    ? " <span class=\"dim\" style=\"font-size:10px;\" title=\"Dollar-weighted: total End vs total Start\">(" +
+      (bookPct >= 0 ? "+" : "") + bookPct.toFixed(1) + "% on $)</span>"
+    : "";
   let html =
-    "<tr style=\"border-top:1px solid var(--panel-border);\">" +
-      "<td colspan=\"6\">Open positions (" + positions.length + ")</td>" +
-      "<td>" + optPctCell(openPct) + "</td>" +
-      "<td>" + optMoneyCell(openCost) + "</td>" +
-      "<td>" + optMoneyCell(openValue) + "</td><td></td>" +
+    "<tr style=\"border-top:1px solid var(--panel-border);font-weight:600;\">" +
+      "<td colspan=\"6\">Total — " + positions.length + " open (P&amp;L is the average of the rows)</td>" +
+      "<td title=\"Average of the P&amp;L column\">avg " + optPctCell(avgPct) + bookNote + "</td>" +
+      "<td title=\"Total cost at entry\">" + optMoneyCell(openCost) + "</td>" +
+      "<td title=\"Total current value\">" + optMoneyCell(openValue) + "</td><td></td>" +
     "</tr>";
   if (summary && summary.cash != null && summary.equity != null) {
     html +=

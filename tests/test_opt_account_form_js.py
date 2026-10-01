@@ -300,17 +300,31 @@ def _footer(script_args):
 def test_open_positions_footer_totals_cost_value_cash_and_account():
     summary = "{cash: 98000.4, equity: 100199.6, return_pct: 0.2}"
     text = _footer(_POSITIONS + ", " + summary)
-    # Open book: cost 1,800; value 1,200 + 800 (no mark -> carried at cost) = 2,000; +11.1%
-    assert "Open positions (2)|+11.1%|$1,800|$2,000|" in text
+    # Average P&L over rows with a mark: AAPL 6/5-1 = +20.0% (MSFT has no mark).
+    # Dollar-weighted book: value 1,200 + 800 (carried at cost) = 2,000 vs cost 1,800 = +11.1%.
+    assert "Total — 2 open" in text
+    assert "|avg |+20.0%| |(+11.1% on $)|$1,800|$2,000|" in text
     assert "Cash|$98,000|" in text
     assert "ACCOUNT VALUE|+0.2%|$100,200|" in text
 
 
 def test_open_positions_footer_without_summary_shows_only_the_open_book():
     text = _footer(_POSITIONS)
-    assert "Open positions (2)" in text
+    assert "Total — 2 open" in text
     assert "Cash" not in text and "ACCOUNT VALUE" not in text
 
 
 def test_no_open_positions_renders_no_footer():
     assert _footer("[], {cash: 1, equity: 1, return_pct: 0}") is None
+
+
+def test_average_pnl_is_the_mean_of_the_row_percentages():
+    rows = """[
+      {underlying: "A", put_call: "CALL", strike: 1, expiration_date: "2026-10-16", contracts: 1,
+       entry_premium: 1, cost_basis: 100, current_premium: 2, current_value: 200},
+      {underlying: "B", put_call: "CALL", strike: 1, expiration_date: "2026-10-16", contracts: 10,
+       entry_premium: 10, cost_basis: 10000, current_premium: 5, current_value: 5000}
+    ]"""
+    text = _footer(rows)
+    # Rows: +100% and -50% -> average +25.0%; dollars: 5,200 / 10,100 -> -48.5%.
+    assert "|avg |+25.0%| |(-48.5% on $)|$10,100|$5,200|" in text
