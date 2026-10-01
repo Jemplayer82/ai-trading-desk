@@ -552,7 +552,7 @@ async function renderOptionsView(scanId, preloadedScan) {
     optBannerHtml(scan) +
     optProgressHtml(scan) +
     optSummaryHtml(summary) +
-    optOpenPositionsHtml(openPositions) +
+    optOpenPositionsHtml(openPositions, summary) +
     optClosedPositionsHtml(settledPositions) +
     optDecisionsHtml(scan) +
     optReportHtml(scan);
@@ -620,7 +620,39 @@ function optSummaryHtml(s) {
   );
 }
 
-function optOpenPositionsHtml(positions) {
+// Footer totals, mirroring the S&P portfolio table: the open book at cost and
+// at its current marks, the account's cash, and the account value with its
+// return since inception. Cash and account value come from /api/options-summary
+// (the authoritative ledger) when available, so they match the [ Account ] bar.
+function optOpenTotalsHtml(positions, summary) {
+  const costOf = (p) => Number(p.cost_basis) || 0;
+  const valueOf = (p) => (p.current_value != null ? Number(p.current_value) : costOf(p));
+  const openCost = positions.reduce((t, p) => t + costOf(p), 0);
+  const openValue = positions.reduce((t, p) => t + valueOf(p), 0);
+  const openPct = openCost > 0 ? (openValue / openCost - 1) * 100 : null;
+  let html =
+    "<tr style=\"border-top:1px solid var(--panel-border);\">" +
+      "<td colspan=\"6\">Open positions (" + positions.length + ")</td>" +
+      "<td>" + optPctCell(openPct) + "</td>" +
+      "<td>" + optMoneyCell(openCost) + "</td>" +
+      "<td>" + optMoneyCell(openValue) + "</td><td></td>" +
+    "</tr>";
+  if (summary && summary.cash != null && summary.equity != null) {
+    html +=
+      "<tr style=\"color:var(--accent-yellow);\">" +
+        "<td colspan=\"8\">Cash</td>" +
+        "<td>$" + Math.round(summary.cash).toLocaleString() + "</td><td></td>" +
+      "</tr>" +
+      "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
+        "<td colspan=\"6\">ACCOUNT VALUE</td>" +
+        "<td>" + optPctCell(summary.return_pct) + "</td><td></td>" +
+        "<td>$" + Math.round(summary.equity).toLocaleString() + "</td><td></td>" +
+      "</tr>";
+  }
+  return "<tfoot>" + html + "</tfoot>";
+}
+
+function optOpenPositionsHtml(positions, summary = null) {
   if (!positions.length) {
     return (
       "<div class=\"panel\">" +
@@ -665,6 +697,7 @@ function optOpenPositionsHtml(positions) {
         "<table class=\"spy-table\">" +
           "<thead><tr><th>Contract</th><th>Signal</th><th>DTE</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th title=\"Total cost at entry\">Start</th><th title=\"Current total value\">End</th><th>Rationale</th></tr></thead>" +
           "<tbody>" + rows + "</tbody>" +
+          optOpenTotalsHtml(positions, summary) +
         "</table>" +
       "</div>" +
     "</div>"

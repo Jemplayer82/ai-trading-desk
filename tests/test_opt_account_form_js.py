@@ -276,3 +276,41 @@ def test_stop_summary_resolves_from_utils():
     assert result["stopLimit"] == "stop 60% / limit 5%"
     assert result["trailingPct"] == "trail 10%"
     assert result["trailingDollar"] == "trail $2.5"
+
+# ── Open-positions totals footer (mirrors the S&P portfolio table) ──────────
+
+_POSITIONS = """[
+  {underlying: "AAPL", put_call: "CALL", strike: 200, expiration_date: "2026-10-16",
+   contracts: 2, entry_premium: 5, cost_basis: 1000, current_premium: 6, current_value: 1200},
+  {underlying: "MSFT", put_call: "PUT", strike: 400, expiration_date: "2026-10-23",
+   contracts: 1, entry_premium: 8, cost_basis: 800, current_premium: null, current_value: null}
+]"""
+
+
+def _footer(script_args):
+    out = _run(
+        "const html = optOpenPositionsHtml(" + script_args + ");\n"
+        "const i = html.indexOf('<tfoot>');\n"
+        "return i < 0 ? null : html.slice(i, html.indexOf('</tfoot>') + 8)"
+        ".replace(/<[^>]+>/g, '|').replace(/\\|+/g, '|');"
+    )
+    return out
+
+
+def test_open_positions_footer_totals_cost_value_cash_and_account():
+    summary = "{cash: 98000.4, equity: 100199.6, return_pct: 0.2}"
+    text = _footer(_POSITIONS + ", " + summary)
+    # Open book: cost 1,800; value 1,200 + 800 (no mark -> carried at cost) = 2,000; +11.1%
+    assert "Open positions (2)|+11.1%|$1,800|$2,000|" in text
+    assert "Cash|$98,000|" in text
+    assert "ACCOUNT VALUE|+0.2%|$100,200|" in text
+
+
+def test_open_positions_footer_without_summary_shows_only_the_open_book():
+    text = _footer(_POSITIONS)
+    assert "Open positions (2)" in text
+    assert "Cash" not in text and "ACCOUNT VALUE" not in text
+
+
+def test_no_open_positions_renders_no_footer():
+    assert _footer("[], {cash: 1, equity: 1, return_pct: 0}") is None
