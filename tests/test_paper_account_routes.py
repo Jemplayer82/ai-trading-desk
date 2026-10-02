@@ -528,8 +528,8 @@ def test_staged_options_create_partial_update_and_switch(client):
     assert resp.status_code == 200
     assert (resp.json()['account']['stage_trigger_pct'], resp.json()['account']['stage_trail_pct']) == (20, 5)
     resp = client.put(f"/api/paper-accounts/{acct['id']}", json={'stop_value': 4})
-    assert resp.status_code == 400
-    assert db.get_paper_account(acct['id'])['stop_value'] == 20
+    assert resp.status_code == 200
+    assert db.get_paper_account(acct['id'])['stop_value'] == 4
     resp = client.put(f"/api/paper-accounts/{acct['id']}", json={'stop_type': 'trailing_pct'})
     assert resp.status_code == 200
     assert resp.json()['account']['stage_trigger_pct'] is None
@@ -549,7 +549,16 @@ def test_equity_rejects_staged_create_and_update(client):
     assert db.get_paper_account(acct['id'])['stop_type'] == 'none'
 
 
-@pytest.mark.parametrize('extra', [dict(stage_trigger_pct=0), dict(stage_trail_pct=4), dict(stage_trail_pct=21)])
+@pytest.mark.parametrize('extra', [dict(stage_trigger_pct=0), dict(stage_trail_pct=0), dict(stage_trail_pct=100)])
 def test_staged_route_bounds(client, extra):
     resp = client.post('/api/paper-accounts', json=dict(name='bad-stage', kind='options', stop_type='trailing_staged', stop_value=20, **extra))
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('trail', [1, 40, 99])
+def test_staged_route_allows_looser_and_bounds(client, trail):
+    acct = _create_account(client, name='staged-wide', kind='options', stop_type='trailing_staged', stop_value=20, stage_trail_pct=trail)
+    assert acct['stage_trail_pct'] == trail
+    resp = client.put(f"/api/paper-accounts/{acct['id']}", json={'stage_trail_pct': 40, 'stage_trigger_pct': 25, 'stop_value': 15})
+    assert resp.status_code == 200
+    assert (resp.json()['account']['stage_trail_pct'], resp.json()['account']['stop_value']) == (40, 15)

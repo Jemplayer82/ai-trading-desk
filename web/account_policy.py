@@ -175,8 +175,8 @@ def validate_policy(
             raise ValueError("stage percentages must be finite numbers") from None
         if not math.isfinite(trigger) or trigger <= 0:
             raise ValueError("stage_trigger_pct must be finite and greater than 0")
-        if not math.isfinite(tight) or not 5 <= tight <= value:
-            raise ValueError("stage_trail_pct must be at least 5 and no greater than stop_value")
+        if not math.isfinite(tight) or not 1 <= tight <= 99:
+            raise ValueError("stage_trail_pct must be between 1 and 99")
         return StopPolicy(stop_type, value, None, trigger, tight)
 
     if stop_type == "stop_limit":
@@ -214,6 +214,7 @@ def evaluate(
     mark: float,
     prev_mark: float | None = None,
     armed: bool = False,
+    stop_level_hwm: float | None = None,
 ) -> StopOutcome:
     """The single simulated-stop decision function shared by equity and options."""
     entry_f = float(entry or 0)
@@ -238,6 +239,8 @@ def evaluate(
     else:  # trailing_dollar
         level = peak_eff - value
 
+    if policy.stop_type == "trailing_staged" and stop_level_hwm is not None:
+        level = max(level, float(stop_level_hwm))
     level = round(level, 4)
 
     if policy.stop_type == "stop_limit":
@@ -297,8 +300,9 @@ def describe_policy(policy: StopPolicy) -> str:
     if policy.stop_type == "trailing_staged":
         return (
             f"Sells if the price falls {value:g}% from its highest point; once the position is "
-            f"up {policy.stage_trigger_pct:g}%, the stop tightens to "
-            f"{policy.stage_trail_pct:g}% below the highest point."
+            f"up {policy.stage_trigger_pct:g}%, the trail becomes "
+            f"{policy.stage_trail_pct:g}% below the highest point. "
+            "The stop level never falls; edits apply to open positions at the next evaluation."
         )
 
     if policy.stop_type == "trailing_pct":

@@ -100,6 +100,8 @@ function stopFieldVisibility(prefix) {
     const wrap = document.getElementById(prefix + "-" + field + "-wrap");
     if (wrap) { wrap.hidden = type !== "trailing_staged"; wrap.style.display = wrap.hidden ? "none" : ""; }
   }
+  const stageHelp = document.getElementById(prefix + "-stage-help");
+  if (stageHelp) { stageHelp.hidden = type !== "trailing_staged"; }
   if (type === "trailing_staged") {
     for (const [field, value] of [["stop-value", 20], ["stage-trigger", 20], ["stage-trail", 10]]) {
       const input = document.getElementById(prefix + "-" + field);

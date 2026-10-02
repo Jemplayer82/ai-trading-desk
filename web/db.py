@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS options_positions (
     data_source TEXT,
     exit_underlying REAL,
     exit_underlying_source TEXT,
+    stop_level_hwm REAL,
     stop_triggered_at TEXT  -- set when a stop-limit trigger fired but the mark gapped below the limit price, so a resting fill is still pending
 );
 
@@ -374,6 +375,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Trailing stop: highest premium ever marked (seeded at entry). Enables
     # "lock gains once armed" without a full mark-history table.
     ("options_positions", "peak_premium", "REAL"),
+    ("options_positions", "stop_level_hwm", "REAL"),
     # Same-day deep-dive reuse: shared-stage config fingerprint (see
     # web/spy_scanner.py _deep_dive_fingerprint) + provenance pointer to the
     # donor analysis a row's portfolio-manager rerun was based on.
@@ -2100,6 +2102,7 @@ def mark_options_position(
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     stale_sql = ", stale_count = 0" if reset_stale else ", stale_count = stale_count + 1"
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "UPDATE options_positions SET current_premium = ?, current_value = ?, "
             "peak_premium = MAX(COALESCE(peak_premium, entry_premium), ?), "
@@ -2107,6 +2110,48 @@ def mark_options_position(
             (round(float(premium), 4), round(float(value), 2), round(float(premium), 4),
              now, price_source, position_id),
         )
+
+        # Persist the staged ratchet on every mark, including carried marks.
+        # Stop execution still belongs to the existing fresh-quote/DTE paths.
+        from web import account_policy
+        row = conn.execute("SELECT * FROM options_positions WHERE id = ? AND status = 'open'", (position_id,)).fetchone()
+        if row is not None:
+            account = conn.execute("SELECT * FROM paper_accounts WHERE id = ?", (row["paper_account_id"],)).fetchone()
+            policy = account_policy.StopPolicy.from_account(dict(account) if account else None)
+            if policy.stop_type == "trailing_staged":
+                _evaluate_staged_stop(conn, dict(row), policy)
+        conn.commit()
+
+
+def _evaluate_staged_stop(conn, pos, policy, prev_mark=None):
+    """Compute and save under the writer transaction; evaluate() owns the rule."""
+    from web import account_policy
+    stored = conn.execute("SELECT peak_premium, stop_level_hwm FROM options_positions WHERE id = ?", (pos["id"],)).fetchone()
+    previous_level = pos.get("stop_level_hwm")
+    peak = max(float(pos.get("peak_premium") or 0), float(pos.get("current_premium") or 0))
+    if stored is not None:
+        peak = max(peak, float(stored["peak_premium"] or 0))
+        if stored["stop_level_hwm"] is not None:
+            previous_level = max(previous_level or 0, stored["stop_level_hwm"])
+    outcome = account_policy.evaluate(
+        policy, entry=pos["entry_premium"], peak=peak,
+        mark=pos.get("current_premium") if pos.get("current_premium") is not None else pos["entry_premium"],
+        prev_mark=prev_mark, stop_level_hwm=previous_level,
+    )
+    conn.execute(
+        "UPDATE options_positions SET stop_level_hwm = MAX(COALESCE(stop_level_hwm, ?), ?) "
+        "WHERE id = ? AND status = 'open'", (outcome.level, outcome.level, pos["id"]),
+    )
+    return outcome
+
+
+def evaluate_staged_options_stop(pos, policy, prev_mark=None):
+    """Serialize ratchet reads/writes across hourly and daily workers."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        outcome = _evaluate_staged_stop(conn, pos, policy, prev_mark)
+        conn.commit()
+        return outcome
 
 
 def arm_options_stop_limit(position_id: int, when: str | None = None) -> bool:

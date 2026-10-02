@@ -175,8 +175,8 @@ async function saveOptAccount() {
     const base = parseFloat(stopValue);
     if (!Number.isFinite(base) || base <= 0 || base >= 100 ||
         !Number.isFinite(stageTrigger) || stageTrigger <= 0 ||
-        !Number.isFinite(stageTrail) || stageTrail < 5 || stageTrail > base) {
-      alert("Staged stop needs a base trail below 100%, a positive gain trigger, and a tighter trail from 5% through the base trail.");
+        !Number.isFinite(stageTrail) || stageTrail < 1 || stageTrail > 99) {
+      alert("Staged stop needs a base trail below 100%, a positive gain trigger, and a stage trail from 1% through 99%.");
       return;
     }
   }

@@ -59,20 +59,21 @@ def test_equal_trails_byte_identity_on_1000_random_paths():
     plain = ap.StopPolicy('trailing_pct', 20)
     for _ in range(1000):
         entry = rng.uniform(.05, 100)
-        peak, previous = entry, None
+        peak, previous, level = entry, None, None
         for _ in range(40):
             mark = entry * rng.uniform(.1, 3)
             peak = max(peak, mark)
             kwargs = dict(entry=entry, peak=peak, mark=mark, prev_mark=previous)
-            assert json.dumps(asdict(ap.evaluate(staged, **kwargs)), sort_keys=True) == json.dumps(
+            assert json.dumps(asdict(ap.evaluate(staged, stop_level_hwm=level, **kwargs)), sort_keys=True) == json.dumps(
                 asdict(ap.evaluate(plain, **kwargs)), sort_keys=True)
+            level = ap.evaluate(staged, stop_level_hwm=level, **kwargs).level
             previous = mark
 
 
 @pytest.mark.parametrize(('base', 'trigger', 'tight'), [
     (0, 20, 10), (100, 20, 10), (float('nan'), 20, 10), (float('inf'), 20, 10),
     (20, 0, 10), (20, -1, 10), (20, float('nan'), 10), (20, float('inf'), 10),
-    (20, '', 10), (20, 20, ''), (20, 20, 4.99), (20, 20, 20.01),
+    (20, '', 10), (20, 20, ''), (20, 20, .99), (20, 20, 99.01),
     (20, 20, float('nan')), (20, 20, float('inf')), (20, 'abc', 10),
 ])
 def test_validation_bounds(base, trigger, tight):
@@ -91,10 +92,10 @@ def test_defaults_discard_and_runtime_kind():
             ap.validate_policy('trailing_staged', 20, None, kind=kind)
         assert ap.StopPolicy.from_account(dict(stop_type='trailing_staged', stop_value=20, kind=kind)) == ap.NONE
     assert ap.StopPolicy.from_account(dict(stop_type='trailing_staged', stop_value=20, kind='options')) == p
-    assert ap.StopPolicy.from_account(dict(stop_type='trailing_staged', stop_value=20, kind='options', stage_trail_pct=21)) == ap.NONE
+    assert ap.StopPolicy.from_account(dict(stop_type='trailing_staged', stop_value=20, kind='options', stage_trail_pct=100)) == ap.NONE
     assert ap.validate_policy('trailing_pct', 20, None, 20, 10) == ap.StopPolicy('trailing_pct', 20)
     assert ap.describe_policy(p) == ('Sells if the price falls 20% from its highest point; once the position is '
-                                     'up 20%, the stop tightens to 10% below the highest point.')
+                                     'up 20%, the trail becomes 10% below the highest point. The stop level never falls; edits apply to open positions at the next evaluation.')
 
 
 def test_additive_migration_on_pre_staged_schema(tmp_path, monkeypatch):
@@ -122,21 +123,70 @@ def test_additive_migration_on_pre_staged_schema(tmp_path, monkeypatch):
     assert db.get_paper_account(aid)['stage_trail_pct'] is None
 
 
-def test_real_bull_replay_daily_close_cross_check():
+@pytest.mark.parametrize('trail', [5, 10, 40])
+def test_real_bull_replay_daily_close_cross_check(trail):
     data = json.loads((Path(__file__).parent / 'fixtures/staged-stop-bull.json').read_text())
     for trade in data['trades']:
         peak, previous = trade['entry_premium'], None
-        triggered = None
+        triggered, level = None, None
+        expected = trade['expected_by_trail'][str(trail)]
         for row in trade['quotes']:
             mid = (row['bid'] + row['ask']) / 2
             peak = max(peak, mid)
-            out = ap.evaluate(policy(), entry=trade['entry_premium'], peak=peak, mark=mid, prev_mark=previous)
+            out = ap.evaluate(policy(tight=trail), entry=trade['entry_premium'], peak=peak, mark=mid, prev_mark=previous, stop_level_hwm=level)
+            level = out.level
             if out.action == 'fill':
                 triggered = row['session']
-                assert out.level == pytest.approx(trade['expected_level'], abs=0.00005)
+                assert out.level == pytest.approx(expected['final_stop_level'], abs=0.00005)
                 break
             previous = mid
-        assert triggered == trade['expected_trigger_session']
+        assert triggered == expected['trigger_session']
         # Replay fills at the next valid session bid, unlike immediate desk fills.
         next_valid = next(r['session'] for r in trade['quotes'] if r['session'] > triggered)
-        assert next_valid == trade['expected_exit_session']
+        assert next_valid == expected['exit_session']
+
+
+@pytest.mark.parametrize('trail', [1, 1.5, 40, 99])
+def test_any_stage_trail_inclusive(trail):
+    assert policy(tight=trail).stage_trail_pct == trail
+    assert 'tightens' not in ap.describe_policy(policy(tight=trail))
+
+
+def test_looser_stage_ratchets_as_peak_rises_and_settings_change():
+    level = None
+    levels = []
+    for peak in (10, 11.99, 12, 13, 16, 20):
+        level = ap.evaluate(policy(tight=40), entry=10, peak=peak, mark=peak, stop_level_hwm=level).level
+        levels.append(level)
+    assert levels == [8, 9.592, 9.592, 9.592, 9.6, 12]
+    tighter = ap.evaluate(policy(tight=5), entry=10, peak=20, mark=20, stop_level_hwm=level)
+    assert tighter.level == 19
+    looser = ap.evaluate(policy(base=40, trigger=200, tight=99), entry=10, peak=20, mark=18,
+                         prev_mark=20, stop_level_hwm=tighter.level)
+    assert (looser.level, looser.action, looser.fill_price) == (19, 'fill', 19)
+
+
+@pytest.mark.parametrize('stop_type', ['stop', 'stop_limit', 'trailing_pct', 'trailing_dollar', 'none'])
+def test_other_types_ignore_saved_ratchet(stop_type):
+    p = ap.StopPolicy(stop_type, 20, 10)
+    kwargs = dict(entry=10, peak=12, mark=11)
+    assert ap.evaluate(p, **kwargs) == ap.evaluate(p, stop_level_hwm=100, **kwargs)
+
+
+def test_ratchet_migration_preserves_old_open_row_null(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'pre-ratchet.db')
+    with sqlite3.connect(db.DB_PATH) as conn:
+        conn.executescript(db.SCHEMA.replace('    stop_level_hwm REAL,\n', ''))
+        conn.execute("INSERT INTO paper_accounts (id,name,created_at,kind) VALUES (1,'old','2026-10-02','options')")
+        conn.execute("""INSERT INTO options_positions
+            (paper_account_id,open_scan_id,occ_symbol,underlying,put_call,strike,expiration_date,
+             contracts,entry_premium,cost_basis,opened_at,peak_premium)
+            VALUES (1,1,'TEST','TEST','CALL',100,'2026-11-20',1,10,1000,'2026-10-02',12)""")
+        before = conn.execute('SELECT * FROM options_positions').fetchone()
+    db.init_db()
+    db.init_db()
+    with sqlite3.connect(db.DB_PATH) as conn:
+        after = conn.execute('SELECT * FROM options_positions').fetchone()
+        assert after == (*before, None)
+        col = next(c for c in conn.execute('PRAGMA table_info(options_positions)') if c[1] == 'stop_level_hwm')
+        assert col[2:5] == ('REAL', 0, None)

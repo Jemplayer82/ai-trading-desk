@@ -153,3 +153,13 @@ def test_staged_fields_inside_options_tier_only():
         _assert_id_in_tier_block(html, field, 4)
         assert f'id="{field}-wrap" hidden' in html
     assert 'new-acct-stage-trigger' not in html
+
+
+def test_staged_form_bounds_and_edit_help():
+    html = (ROOT / 'web/static/index.html').read_text(encoding='utf-8')
+    if not (ROOT / 'web/static/options.js').exists():
+        pytest.skip('options absent at this tier')
+    assert html.count('id="opt-new-stage-help"') == 1
+    assert re.search(r'id="opt-new-stage-trail" min="1" max="99"', html)
+    assert 'Edits apply to open positions at the next price check.' in html
+    assert 'a looser setting never lowers a stop already reached' in html

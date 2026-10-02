@@ -1,24 +1,44 @@
 # Prospective staged-stop A/B draft — unsigned, no account created
 
 Card #57 / lane DK. Opt-in options policy `trailing_staged`, base 20%, trigger
-20% peak gain over entry, tighter trail 10%. Existing accounts are unchanged.
+20% peak gain over entry, stage trail 10%. Existing accounts are unchanged.
 This draft requires claude-quant review before a forward experiment is signed.
 
 ## ASSUMPTIONS
 
 - Omitted or NULL staged parameters on an opt-in save normalize to 20/10;
   blank strings are invalid. Other stop types discard both stage parameters.
-- Trigger is a finite positive percent with no upper cap. Tight trail is finite,
-  at least 5%, no greater than base. Base is positive and less than 100%.
+- Trigger is a finite positive percent with no upper cap. Stage trail is finite,
+  between 1% and 99% inclusive (fractional values allowed), independent of base.
+  Base is positive and less than 100%.
 - Staged policy validation needs kind=options; runtime parsing rejects equity
   or missing-kind staged records. Existing policy parsing stays unchanged.
 - Exact trigger comparisons tolerate only binary float noise (relative/absolute
   epsilon 1e-12). Stop/fill rounding and crossing stay exactly as existing trails.
 - Replay fixtures select three desk stop exits in export order, including at
-  least one switched exit. Only quotes up through that exit are copied.
+  least one switched exit. Only quotes up through the latest of the
+  5/10/40 exits are copied.
 - Forward comparison is descriptive. Enrollment duration/sample size and any
   confirmatory decision thresholds must be signed before account creation;
   no implementation choice supplies evidence of efficacy.
+- A NULL saved stop level means no previous evaluation; initialize from the
+  current peak and policy, without inventing historical pre-trigger observations.
+  Save four-decimal levels like existing stops. Preserve the ratchet across edits
+  and temporary switches away from staged; other stop types ignore it.
+- Mark updates persist the ratchet even for carried marks, without executing a
+  stop there. Hourly fills still require fresh quotes; DTE floor retains priority.
+  Daily and hourly staged evaluations serialize their saved-level reads/writes.
+- Mid-trade edits are supported mechanically; experiment enrollment still freezes
+  parameters. Any discretionary edit must be logged and ends the fixed-policy
+  comparison interval. Trigger edits re-evaluate stage membership from peak.
+
+## Round 2 amendment
+
+Any after-trigger trail from 1 to 99 is allowed. Candidate levels use base before
+the trigger and stage trail after it. The saved stop is the maximum of the
+previous saved level and candidate, so changing any parameter never lowers it.
+Defaults remain 20/20/10. Tightening can cause an immediate stop at the next
+evaluation if its raised level is at or above the mark.
 
 ## Build attribution assumption
 

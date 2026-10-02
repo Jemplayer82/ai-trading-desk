@@ -953,3 +953,68 @@ def test_staged_intraday_and_daily_share_policy(account_id, monkeypatch):
     # The unconditional floor retains priority over the staged stop.
     floor = dict(daily, expiration_date='2000-01-01')
     assert options_allocator.forced_closes([floor], policy) == [(floor, 'dte_floor', 10.5)]
+
+
+def test_staged_saved_ratchet_and_midtrade_account_edits(account_id, monkeypatch):
+    from web import account_policy, options_allocator
+    db.update_paper_account(account_id, stop_type='trailing_staged', stop_value=20,
+                           stage_trigger_pct=20, stage_trail_pct=40)
+    scan = db.create_spy_scan('2026-07-20', paper_account_id=account_id, kind='options')
+    pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=10, expiration_date='2099-01-15'))
+    assert db.get_options_position(pid)['stop_level_hwm'] is None
+    # Save base stop before triggering a looser stage; a carried mark cannot fill.
+    db.mark_options_position(pid, 11.99, 2398, 'carried', reset_stale=False)
+    assert db.get_options_position(pid)['stop_level_hwm'] == 9.592
+    db.mark_options_position(pid, 12, 2400, 'schwab')
+    assert db.get_options_position(pid)['stop_level_hwm'] == 9.592
+    db.mark_options_position(pid, 13, 2600, 'schwab')
+    assert db.get_options_position(pid)['stop_level_hwm'] == 9.592
+    stale_snapshot = db.get_options_position(pid)
+    # Edit tighter without updating a mark; daily evaluation raises saved level.
+    db.update_paper_account(account_id, stage_trail_pct=5)
+    tight = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    assert options_allocator.forced_closes([stale_snapshot], tight) == []
+    assert db.get_options_position(pid)['stop_level_hwm'] == 12.35
+    # Edit all parameters looser; stale caller snapshot must use the saved level.
+    db.update_paper_account(account_id, stage_trail_pct=99, stage_trigger_pct=200, stop_value=40)
+    loose = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    monkeypatch.setattr(options_engine, '_backtrack_stop_crossing', lambda *a, **k: None)
+    monkeypatch.setattr(options_engine, '_underlying_prices', lambda syms: {})
+    assert options_engine._apply_intraday_stops([stale_snapshot], {}, {account_id: loose}) == 0
+    assert options_engine._apply_intraday_stops([stale_snapshot], {pid: (12, 'schwab')}, {account_id: loose}) == 1
+    row = db.get_options_position(pid)
+    assert (row['status'], row['stop_level_hwm'], row['exit_premium'], row['exit_reason']) == ('closed', 12.35, 12.35, 'trail_stop')
+
+
+def test_staged_policy_switch_preserves_ratchet(account_id):
+    from web import account_policy, options_allocator
+    db.update_paper_account(account_id, stop_type='trailing_staged', stop_value=20,
+                           stage_trigger_pct=20, stage_trail_pct=10)
+    scan = db.create_spy_scan('2026-07-20', paper_account_id=account_id, kind='options')
+    pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=10, expiration_date='2099-01-15'))
+    db.mark_options_position(pid, 20, 4000, 'schwab')
+    assert db.get_options_position(pid)['stop_level_hwm'] == 18
+    db.update_paper_account(account_id, stop_type='trailing_pct', stop_value=50)
+    db.mark_options_position(pid, 25, 5000, 'schwab')
+    assert db.get_options_position(pid)['stop_level_hwm'] == 18
+    db.update_paper_account(account_id, stop_type='trailing_staged', stage_trail_pct=99)
+    pol = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    outcome = options_allocator.effective_stop_level(db.get_options_position(pid), pol)
+    assert outcome.level == 18
+
+
+def test_staged_tighter_edit_can_fill_at_next_daily_evaluation(account_id):
+    from web import account_policy, options_allocator
+    db.update_paper_account(account_id, stop_type='trailing_staged', stop_value=20,
+                           stage_trigger_pct=20, stage_trail_pct=40)
+    scan = db.create_spy_scan('2026-07-20', paper_account_id=account_id, kind='options')
+    pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=10, expiration_date='2099-01-15'))
+    db.mark_options_position(pid, 12, 2400, 'schwab')
+    db.mark_options_position(pid, 10.5, 2100, 'schwab')
+    loose = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    pos = db.get_options_position(pid)
+    assert options_allocator.forced_closes([pos], loose) == []
+    db.update_paper_account(account_id, stage_trail_pct=10)
+    tight = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    assert options_allocator.forced_closes([pos], tight) == [(pos, 'trail_stop', 10.5)]
+    assert db.get_options_position(pid)['stop_level_hwm'] == 10.8

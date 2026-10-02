@@ -340,11 +340,13 @@ def test_staged_form_defaults_visibility_and_submit():
             const visible = ['stop-value', 'stage-trigger', 'stage-trail'].map(
                 id => !document.getElementById('opt-new-' + id + '-wrap').hidden);
             const label = document.getElementById('opt-new-stop-value-label').textContent;
+            const helpVisible = !document.getElementById('opt-new-stage-help').hidden;
             await saveOptAccount();
-            return { visible, label, body: JSON.parse(__posts[0][1].body) };
+            return { visible, label, helpVisible, body: JSON.parse(__posts[0][1].body) };
         })();
     """)
     assert result['visible'] == [True, True, True]
+    assert result['helpVisible'] is True
     assert result['label'] == 'Trail below peak (%)'
     body = result['body']
     assert (body['stop_type'], body['stop_value'], body['stage_trigger_pct'], body['stage_trail_pct']) == ('trailing_staged', 20, 20, 10)
@@ -375,7 +377,7 @@ def test_staged_form_edit_and_hide_clears_payload():
     assert result['body']['stage_trail_pct'] is None
 
 
-@pytest.mark.parametrize(('trigger', 'tight', 'base'), [('0','10','20'), ('20','4','20'), ('20','21','20'), ('','10','20'), ('20','10','100')])
+@pytest.mark.parametrize(('trigger', 'tight', 'base'), [('0','10','20'), ('20','0','20'), ('20','100','20'), ('','10','20'), ('20','10','100')])
 def test_invalid_staged_form_blocks_submit(trigger, tight, base):
     setup = (
         f"document.getElementById('opt-new-stop-value').value = {base!r};"
@@ -391,3 +393,16 @@ def test_invalid_staged_form_blocks_submit(trigger, tight, base):
         })();
     """)
     assert result == 0
+
+
+@pytest.mark.parametrize('trail', [1, 40, 99])
+def test_staged_form_accepts_after_trigger_amount(trail):
+    result = _run("""
+        return (async () => {
+            populateOptAccountForm({name:'Stage',stop_type:'trailing_staged',stop_value:20,
+                                    stage_trigger_pct:20,stage_trail_pct:TRAIL});
+            await saveOptAccount();
+            return JSON.parse(__posts[0][1].body).stage_trail_pct;
+        })();
+    """.replace('TRAIL', str(trail)))
+    assert result == trail

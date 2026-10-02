@@ -1,5 +1,5 @@
 {
-  "note": "Read-only excerpts of bull account 1, IDs 1/2/3 in export order. Daily midpoint stop observation; next valid session bid exit. No P&L included.",
+  "note": "Read-only bull account 1, IDs 1/2/3; 18 daily bid/ask observations through latest 5/10/40 exit; daily midpoint observation and next-session bid exit. No P&L copied.",
   "sources": [
     {
       "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/manifest.json",
@@ -88,6 +88,14 @@
     {
       "path": "/home/landon/quant-status/runs/ds/desk-trail-result.json",
       "sha256": "a3a65b544e636c6f6518ce1e1d7141d6fc81e668fad55511fa48e836001263f0"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-31.parquet",
+      "sha256": "4aaecd3b7b209a3e6f6950c57ca452e2527def6beba89d53deebf29123b9df59"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/quant/research/desk_trail_replay.py",
+      "sha256": "470f32915a8359dae7c86eface1f0481aea61af036c205b542e107ec2182282d"
     }
   ],
   "trades": [
@@ -125,7 +133,30 @@
       "expected_trigger_session": 2,
       "expected_exit_session": 3,
       "expected_level": 11.480000000000002,
-      "switched": false
+      "switched": false,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        },
+        "10": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        },
+        "40": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        }
+      }
     },
     {
       "entry_id": "2",
@@ -186,12 +217,41 @@
           "date": "2026-07-30",
           "bid": 10.4,
           "ask": 13.9
+        },
+        {
+          "session": 9,
+          "date": "2026-07-31",
+          "bid": 10.0,
+          "ask": 12.5
         }
       ],
       "expected_trigger_session": 7,
       "expected_exit_session": 8,
       "expected_level": 27.45,
-      "switched": true
+      "switched": true,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 7,
+          "exit_session": 8,
+          "exit_date": "2026-07-30",
+          "final_stop_level": 28.974999999999998,
+          "switched": true
+        },
+        "10": {
+          "trigger_session": 7,
+          "exit_session": 8,
+          "exit_date": "2026-07-30",
+          "final_stop_level": 27.45,
+          "switched": true
+        },
+        "40": {
+          "trigger_session": 8,
+          "exit_session": 9,
+          "exit_date": "2026-07-31",
+          "final_stop_level": 18.3,
+          "switched": true
+        }
+      }
     },
     {
       "entry_id": "3",
@@ -227,7 +287,30 @@
       "expected_trigger_session": 2,
       "expected_exit_session": 3,
       "expected_level": 9.219999999999999,
-      "switched": false
+      "switched": false,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        },
+        "10": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        },
+        "40": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        }
+      }
     }
   ]
 }

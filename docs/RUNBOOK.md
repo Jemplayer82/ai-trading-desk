@@ -20,8 +20,8 @@ are thin evidence and do not establish future profitability.
    the web frontend must include the matching options form assets. For the
    compose deployment path in README: `docker compose pull && docker compose up -d`.
 4. Boot-time `init_db()` adds only `stage_trigger_pct REAL` and
-   `stage_trail_pct REAL` to existing paper_accounts, with NULL defaults. There
-   is no staged backfill, table rewrite or account modification. Verify both
+   `stage_trail_pct REAL` to existing paper_accounts, plus `stop_level_hwm REAL`
+   to options_positions, all with NULL defaults. There is no staged backfill, table rewrite or account modification. Verify the three
    columns and existing account policy snapshots before enabling the experiment.
 5. Check the Options form offers staged trail, editing an existing account
    renders its unchanged policy, and the new account summary shows 20/20/10.
@@ -40,16 +40,34 @@ or rewrite the production DB as part of rollback.
 - In Options → account form, create a distinct account named `Bull staged 10%`.
   Copy bull's bias, aggressiveness and starting capital exactly. Use the same
   schedule/cadence (or leave both manual during setup and enroll them together).
-- Select “Trailing 20%, then tighter once up 20%”; set base trail **20**, gain
-  trigger **20**, tighter trail **10**. Save and verify the account summary.
+- Select “Staged trailing % (change after gain trigger)”; set base trail **20**, gain
+  trigger **20**, trail after trigger **10**. Save and verify the account summary.
 - Do not edit bull/bear/small, copy old positions or backdate enrollment. Record
   the new ID and full API policy snapshot before its first scan.
 
 For this policy: “Sells if the price falls 20% from its highest point; once the
-position is up 20%, the stop tightens to 10% below the highest point.” Calls and
-puts use option premium, not underlying direction. Tightening persists through
-pullbacks because the stored peak never decreases. Stale marks and the DTE floor
-retain their existing behavior; exit reporting uses `trail_stop`.
+position is up 20%, the trail becomes 10% below the highest point. The saved stop
+level never falls.” Calls and puts use option premium, not underlying direction.
+The saved highest stop level persists through pullbacks and account edits. NULL
+on old rows initializes at the current peak and settings on the next evaluation;
+historical levels are not reconstructed. Stale marks and the DTE floor retain
+their existing behavior; exit reporting uses `trail_stop`.
+
+## Edit a staged account with open positions
+
+In Options, edit the account and save the base trail, gain trigger and trail
+after trigger. The latter accepts any value from **1 to 99**, tighter or looser
+than the base. Changes apply to every open position at its next evaluation.
+A tighter setting raises the stop immediately at that check and can close a
+position; a looser setting never lowers a stop already reached. A 40% stage
+trail after a 20% base therefore preserves the prior stop until a higher peak
+produces a higher candidate. The saved ratchet also survives switching the account
+away from staged and back; other stop types ignore it. Gain-trigger edits use
+the stored peak to determine the current stage. Daily and hourly checks share
+the evaluator; mark updates save levels but do not execute stops.
+
+For the prospective A/B, keep parameters fixed. Log discretionary edits and
+end the fixed-policy interval before editing; agree a new interval first.
 
 ## Read the forward comparison
 
