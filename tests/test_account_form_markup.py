@@ -115,11 +115,9 @@ def test_stop_type_option_values():
         select_ids.append("opt-new-stop-type")
     if not select_ids:
         pytest.skip("no account modals present at this tier")
-    all_values = []
     for select_id in select_ids:
-        all_values.extend(_stop_type_select_option_values(html, select_id))
-    assert all_values, "stop-type options missing"
-    assert all_values == expected * (len(all_values) // len(expected)), "unexpected stop-type option values"
+        values = _stop_type_select_option_values(html, select_id)
+        assert values == expected + (["trailing_staged"] if select_id == "opt-new-stop-type" else [])
 
 
 def test_simulated_stop_wording_in_modals():
@@ -145,3 +143,13 @@ def test_simulated_stop_wording_in_modals():
 def test_utils_defines_stop_field_visibility():
     utils = (ROOT / "web/static/utils.js").read_text(encoding="utf-8")
     assert "function stopFieldVisibility" in utils
+
+def test_staged_fields_inside_options_tier_only():
+    html = (ROOT / 'web/static/index.html').read_text()
+    if not (ROOT / 'web/static/options.js').exists():
+        assert 'opt-new-stage-trigger' not in html
+        return
+    for field in ('opt-new-stage-trigger', 'opt-new-stage-trail'):
+        _assert_id_in_tier_block(html, field, 4)
+        assert f'id="{field}-wrap" hidden' in html
+    assert 'new-acct-stage-trigger' not in html

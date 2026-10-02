@@ -13,6 +13,7 @@ This module imports only the Python stdlib and nothing from `web/`.
 """
 
 import logging
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,13 +32,14 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-STOP_TYPES = ("none", "stop", "stop_limit", "trailing_pct", "trailing_dollar")
+STOP_TYPES = ("none", "stop", "stop_limit", "trailing_pct", "trailing_dollar", "trailing_staged")
 
 _EXIT_REASON = {
     "stop": "stop_loss",
     "stop_limit": "stop_limit",
     "trailing_pct": "trail_stop",
     "trailing_dollar": "trail_stop",
+    "trailing_staged": "trail_stop",
 }
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -61,6 +63,8 @@ class StopPolicy:
     stop_type: str = "none"
     stop_value: float | None = None
     stop_limit_offset: float | None = None
+    stage_trigger_pct: float | None = None
+    stage_trail_pct: float | None = None
 
     @classmethod
     def from_account(cls, account: Mapping[str, Any] | None) -> StopPolicy:
@@ -97,6 +101,16 @@ class StopPolicy:
             )
             return NONE
 
+        if stop_type == "trailing_staged":
+            try:
+                return validate_policy(
+                    stop_type, value, None, account.get("stage_trigger_pct"),
+                    account.get("stage_trail_pct"), kind=account.get("kind"),
+                )
+            except ValueError as exc:
+                _warn_degraded_to_none(account, stop_type, value, None, str(exc))
+                return NONE
+
         if stop_type == "stop_limit":
             offset = _coerce_float(account.get("stop_limit_offset"))
             if offset is None or offset <= 0:
@@ -116,7 +130,11 @@ class StopPolicy:
 NONE = StopPolicy()
 
 
-def validate_policy(stop_type: object, stop_value: object, stop_limit_offset: object) -> StopPolicy:
+def validate_policy(
+    stop_type: object, stop_value: object, stop_limit_offset: object,
+    stage_trigger_pct: object = None, stage_trail_pct: object = None,
+    *, kind: object = None,
+) -> StopPolicy:
     """Strict parser for HTTP routes. Raises ValueError with a short human
     message on any violation; returns the NORMALIZED policy otherwise."""
     if stop_type is None or stop_type == "":
@@ -130,6 +148,9 @@ def validate_policy(stop_type: object, stop_value: object, stop_limit_offset: ob
     if stop_type == "none":
         return NONE
 
+    if stop_type == "trailing_staged" and kind != "options":
+        raise ValueError("trailing_staged is supported for options accounts only")
+
     if stop_value is None or stop_value == "":
         raise ValueError("stop_value is required for this stop_type")
 
@@ -141,8 +162,22 @@ def validate_policy(stop_type: object, stop_value: object, stop_limit_offset: ob
     if value <= 0:
         raise ValueError("stop_value must be greater than 0")
 
-    if stop_type in ("stop", "stop_limit", "trailing_pct") and value >= 100:
+    if stop_type in ("stop", "stop_limit", "trailing_pct", "trailing_staged") and value >= 100:
         raise ValueError("stop_value must be less than 100 for percentage stops")
+
+    if stop_type == "trailing_staged":
+        if not math.isfinite(value):
+            raise ValueError("stop_value must be finite")
+        try:
+            trigger = float(20 if stage_trigger_pct is None else stage_trigger_pct)
+            tight = float(10 if stage_trail_pct is None else stage_trail_pct)
+        except (TypeError, ValueError):
+            raise ValueError("stage percentages must be finite numbers") from None
+        if not math.isfinite(trigger) or trigger <= 0:
+            raise ValueError("stage_trigger_pct must be finite and greater than 0")
+        if not math.isfinite(tight) or not 5 <= tight <= value:
+            raise ValueError("stage_trail_pct must be at least 5 and no greater than stop_value")
+        return StopPolicy(stop_type, value, None, trigger, tight)
 
     if stop_type == "stop_limit":
         if stop_limit_offset is None or stop_limit_offset == "":
@@ -193,7 +228,12 @@ def evaluate(
 
     if policy.stop_type in ("stop", "stop_limit"):
         level = entry_f * (1 - value / 100)
-    elif policy.stop_type == "trailing_pct":
+    elif policy.stop_type in ("trailing_pct", "trailing_staged"):
+        if policy.stop_type == "trailing_staged":
+            threshold = entry_f * (1 + float(policy.stage_trigger_pct or 20) / 100)
+            # Absorb binary float noise at exact decimal boundaries (+20%).
+            if peak_eff >= threshold or math.isclose(peak_eff, threshold, rel_tol=1e-12, abs_tol=1e-12):
+                value = float(policy.stage_trail_pct or 10)
         level = peak_eff * (1 - value / 100)
     else:  # trailing_dollar
         level = peak_eff - value
@@ -252,6 +292,13 @@ def describe_policy(policy: StopPolicy) -> str:
         return (
             f"A stop-limit triggers {value:g}% below entry and only fills at or above "
             f"{offset:g}% below that trigger — a gap through can leave it unfilled."
+        )
+
+    if policy.stop_type == "trailing_staged":
+        return (
+            f"Sells if the price falls {value:g}% from its highest point; once the position is "
+            f"up {policy.stage_trigger_pct:g}%, the stop tightens to "
+            f"{policy.stage_trail_pct:g}% below the highest point."
         )
 
     if policy.stop_type == "trailing_pct":

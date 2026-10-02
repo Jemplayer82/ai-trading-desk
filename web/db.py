@@ -253,7 +253,9 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     schedule_time TEXT,
     stop_type TEXT NOT NULL DEFAULT 'none',
     stop_value REAL,
-    stop_limit_offset REAL
+    stop_limit_offset REAL,
+    stage_trigger_pct REAL,
+    stage_trail_pct REAL
 );
 
 -- One row per paper option contract position over its whole life. Unlike the
@@ -392,6 +394,8 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("paper_accounts", "stop_type", "TEXT NOT NULL DEFAULT 'none'"),
     ("paper_accounts", "stop_value", "REAL"),
     ("paper_accounts", "stop_limit_offset", "REAL"),
+    ("paper_accounts", "stage_trigger_pct", "REAL"),
+    ("paper_accounts", "stage_trail_pct", "REAL"),
     # Stop-limit arm timestamp: trigger fired but the mark gapped through the
     # limit price, so a resting fill is still pending.
     ("options_positions", "stop_triggered_at", "TEXT"),
@@ -1711,6 +1715,7 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
 _PAPER_ACCOUNT_COLUMNS = (
     "id", "name", "starting_capital", "aggressiveness", "bias", "created_at",
     "kind", "schedule_time", "stop_type", "stop_value", "stop_limit_offset",
+    "stage_trigger_pct", "stage_trail_pct",
 )
 _PAPER_ACCOUNT_SELECT = ", ".join(_PAPER_ACCOUNT_COLUMNS)
 
@@ -1725,6 +1730,8 @@ def create_paper_account(
     stop_type: str = "none",
     stop_value: float | None = None,
     stop_limit_offset: float | None = None,
+    stage_trigger_pct: float | None = None,
+    stage_trail_pct: float | None = None,
 ) -> int:
     """Create a named paper account. Raises sqlite3.IntegrityError if name exists.
 
@@ -1732,11 +1739,11 @@ def create_paper_account(
     """
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, starting_capital, aggressiveness, bias,
              datetime.utcnow().isoformat(timespec="seconds") + "Z", kind,
-             schedule_time, stop_type, stop_value, stop_limit_offset),
+             schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct),
         )
         return int(cur.lastrowid)
 
@@ -1774,6 +1781,8 @@ def update_paper_account(
     stop_type: str | Any = UNSET,
     stop_value: float | None | Any = UNSET,
     stop_limit_offset: float | None | Any = UNSET,
+    stage_trigger_pct: float | None | Any = UNSET,
+    stage_trail_pct: float | None | Any = UNSET,
 ) -> bool:
     """Update one or more paper_account columns. Pass None to NULL a column;
     omit the argument (or pass UNSET) to leave it untouched. Returns True if
@@ -1796,6 +1805,10 @@ def update_paper_account(
         sets.append("stop_value = ?"); vals.append(stop_value)
     if stop_limit_offset is not UNSET:
         sets.append("stop_limit_offset = ?"); vals.append(stop_limit_offset)
+    if stage_trigger_pct is not UNSET:
+        sets.append("stage_trigger_pct = ?"); vals.append(stage_trigger_pct)
+    if stage_trail_pct is not UNSET:
+        sets.append("stage_trail_pct = ?"); vals.append(stage_trail_pct)
     if not sets:
         return True
     vals.append(account_id)

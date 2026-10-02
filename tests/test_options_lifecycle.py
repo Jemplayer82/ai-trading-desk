@@ -928,3 +928,28 @@ def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypa
     assert row2["status"] == "closed"
     assert row2["exit_reason"] == "trail_stop"
     assert row2["exit_premium"] == pytest.approx(14.0)
+
+
+def test_staged_intraday_and_daily_share_policy(account_id, monkeypatch):
+    from web import account_policy, options_allocator
+    db.update_paper_account(account_id, stop_type='trailing_staged', stop_value=20,
+                           stage_trigger_pct=20, stage_trail_pct=10)
+    policy = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
+    monkeypatch.setattr(options_engine, '_backtrack_stop_crossing', lambda *a, **k: None)
+    monkeypatch.setattr(options_engine, '_underlying_prices', lambda syms: {})
+    pid = _open_marked(account_id, entry=10, prev_mark=12)
+    pos = db.get_options_position(pid)
+    # Refresh passes only fresh quotes in priced; stale positions are absent.
+    assert options_engine._apply_intraday_stops([pos], {}, {account_id: policy}) == 0
+    assert db.get_options_position(pid)['status'] == 'open'
+    assert options_engine._apply_intraday_stops([pos], {pid: (10.5, 'schwab')}, {account_id: policy}) == 1
+    row = db.get_options_position(pid)
+    assert row['exit_reason'] == 'trail_stop'
+    assert row['exit_premium'] == pytest.approx(10.8)
+    assert row['peak_premium'] == pytest.approx(12)
+    daily = dict(pos, current_premium=10.5, expiration_date='2099-01-15')
+    closes = options_allocator.forced_closes([daily], policy)
+    assert closes == [(daily, 'trail_stop', 10.5)]
+    # The unconditional floor retains priority over the staged stop.
+    floor = dict(daily, expiration_date='2000-01-01')
+    assert options_allocator.forced_closes([floor], policy) == [(floor, 'dte_floor', 10.5)]

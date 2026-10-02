@@ -328,3 +328,66 @@ def test_average_pnl_is_the_mean_of_the_row_percentages():
     text = _footer(rows)
     # Rows: +100% and -50% -> average +25.0%; dollars: 5,200 / 10,100 -> -48.5%.
     assert "|avg |+25.0%| |(-48.5% on $)|$10,100|$5,200|" in text
+
+
+def test_staged_form_defaults_visibility_and_submit():
+    result = _run("""
+        return (async () => {
+            resetOptAccountForm();
+            document.getElementById('opt-new-name').value = 'Bull staged 10%';
+            document.getElementById('opt-new-stop-type').value = 'trailing_staged';
+            stopFieldVisibility('opt-new');
+            const visible = ['stop-value', 'stage-trigger', 'stage-trail'].map(
+                id => !document.getElementById('opt-new-' + id + '-wrap').hidden);
+            const label = document.getElementById('opt-new-stop-value-label').textContent;
+            await saveOptAccount();
+            return { visible, label, body: JSON.parse(__posts[0][1].body) };
+        })();
+    """)
+    assert result['visible'] == [True, True, True]
+    assert result['label'] == 'Trail below peak (%)'
+    body = result['body']
+    assert (body['stop_type'], body['stop_value'], body['stage_trigger_pct'], body['stage_trail_pct']) == ('trailing_staged', 20, 20, 10)
+    assert body['stop_limit_offset'] is None
+
+
+def test_staged_form_edit_and_hide_clears_payload():
+    result = _run("""
+        return (async () => {
+            populateOptAccountForm({name:'Stage',stop_type:'trailing_staged',stop_value:25,
+                                    stage_trigger_pct:30,stage_trail_pct:15});
+            const values = ['stop-value', 'stage-trigger', 'stage-trail'].map(
+                id => document.getElementById('opt-new-' + id).value);
+            const summary = stopSummary({stop_type:'trailing_staged',stop_value:25,
+                                         stage_trigger_pct:30,stage_trail_pct:15});
+            document.getElementById('opt-new-stop-type').value = 'trailing_pct';
+            stopFieldVisibility('opt-new');
+            const hidden = ['stage-trigger', 'stage-trail'].map(
+                id => document.getElementById('opt-new-' + id + '-wrap').hidden);
+            await saveOptAccount();
+            return {values, summary, hidden, body:JSON.parse(__posts[0][1].body)};
+        })();
+    """)
+    assert [float(x) for x in result['values']] == [25, 30, 15]
+    assert result['summary'] == 'trail 25%; once up 30%, trail 15%'
+    assert result['hidden'] == [True, True]
+    assert result['body']['stage_trigger_pct'] is None
+    assert result['body']['stage_trail_pct'] is None
+
+
+@pytest.mark.parametrize(('trigger', 'tight', 'base'), [('0','10','20'), ('20','4','20'), ('20','21','20'), ('','10','20'), ('20','10','100')])
+def test_invalid_staged_form_blocks_submit(trigger, tight, base):
+    setup = (
+        f"document.getElementById('opt-new-stop-value').value = {base!r};"
+        f"document.getElementById('opt-new-stage-trigger').value = {trigger!r};"
+        f"document.getElementById('opt-new-stage-trail').value = {tight!r};"
+    )
+    result = _run(setup + """
+        return (async () => {
+            document.getElementById('opt-new-name').value = 'Stage';
+            document.getElementById('opt-new-stop-type').value = 'trailing_staged';
+            await saveOptAccount();
+            return __posts.length;
+        })();
+    """)
+    assert result == 0

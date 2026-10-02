@@ -9,6 +9,11 @@ Breaking changes within the 0.x line are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **Opt-in staged options trail.** `trailing_staged` follows the base trail until
+  peak premium reaches the configured gain over entry, then uses a tighter trail
+  (defaults 20% / 20% / 10%). Options create/edit forms, account summaries and
+  nullable additive schema migrations support it; existing accounts are unchanged.
+  See `docs/RUNBOOK.md` for deployment and the prospective paper comparison.
 - **ChatGPT via the switchboard.** New `scripts/codex_llm_handler.py` (deploy notes in
   `deploy/codex/`) answers `llm_request`s with `codex exec` on the host's ChatGPT
   sign-in, locked down (no shell/browser/apps, read-only sandbox, empty temp dir).

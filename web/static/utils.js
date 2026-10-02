@@ -96,9 +96,19 @@ function stopFieldVisibility(prefix) {
   const valueLabel = document.getElementById(prefix + "-stop-value-label");
   if (valueWrap) { valueWrap.hidden = (type === "none"); valueWrap.style.display = (type === "none") ? "none" : ""; }
   if (offsetWrap) { offsetWrap.hidden = (type !== "stop_limit"); offsetWrap.style.display = (type !== "stop_limit") ? "none" : ""; }
+  for (const field of ["stage-trigger", "stage-trail"]) {
+    const wrap = document.getElementById(prefix + "-" + field + "-wrap");
+    if (wrap) { wrap.hidden = type !== "trailing_staged"; wrap.style.display = wrap.hidden ? "none" : ""; }
+  }
+  if (type === "trailing_staged") {
+    for (const [field, value] of [["stop-value", 20], ["stage-trigger", 20], ["stage-trail", 10]]) {
+      const input = document.getElementById(prefix + "-" + field);
+      if (input && input.value === "") input.value = value;
+    }
+  }
   if (valueLabel) {
     valueLabel.textContent = type === "trailing_dollar" ? "Trail amount ($)"
-      : type === "trailing_pct" ? "Trail below peak (%)"
+      : (type === "trailing_pct" || type === "trailing_staged") ? "Trail below peak (%)"
       : "Stop below entry (%)";
   }
 }
@@ -114,6 +124,7 @@ function stopSummary(a) {
   const v = a.stop_value;
   if (t === "stop") return `stop ${escapeHtml(v)}%`;
   if (t === "stop_limit") return `stop ${escapeHtml(v)}% / limit ${escapeHtml(a.stop_limit_offset ?? 0)}%`;
+  if (t === "trailing_staged") return `trail ${escapeHtml(v)}%; once up ${escapeHtml(a.stage_trigger_pct)}%, trail ${escapeHtml(a.stage_trail_pct)}%`;
   if (t === "trailing_pct") return `trail ${escapeHtml(v)}%`;
   if (t === "trailing_dollar") return `trail $${escapeHtml(v)}`;
   return escapeHtml(t);

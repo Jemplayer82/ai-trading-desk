@@ -66,9 +66,14 @@ def _clean_schedule_time(raw: Any) -> str | None:
     return s
 
 
-def _clean_stop_policy(stop_type: Any, stop_value: Any, stop_limit_offset: Any) -> account_policy.StopPolicy:
+def _clean_stop_policy(
+    stop_type: Any, stop_value: Any, stop_limit_offset: Any,
+    stage_trigger_pct: Any = None, stage_trail_pct: Any = None, *, kind: Any = None,
+) -> account_policy.StopPolicy:
     try:
-        return account_policy.validate_policy(stop_type, stop_value, stop_limit_offset)
+        return account_policy.validate_policy(
+            stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct, kind=kind,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -93,7 +98,10 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
     if bias not in ("bullish", "neutral", "bearish"):
         raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
     schedule_time = _clean_schedule_time(body.get("schedule_time", _DEFAULT_SCHEDULE_TIME[kind]))
-    policy = _clean_stop_policy(body.get("stop_type"), body.get("stop_value"), body.get("stop_limit_offset"))
+    policy = _clean_stop_policy(
+        body.get("stop_type"), body.get("stop_value"), body.get("stop_limit_offset"),
+        body.get("stage_trigger_pct"), body.get("stage_trail_pct"), kind=kind,
+    )
     try:
         account_id = db.create_paper_account(
             name=name,
@@ -105,6 +113,8 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
             stop_type=policy.stop_type,
             stop_value=policy.stop_value,
             stop_limit_offset=policy.stop_limit_offset,
+            stage_trigger_pct=policy.stage_trigger_pct,
+            stage_trail_pct=policy.stage_trail_pct,
         )
     except Exception as exc:
         if "UNIQUE" in str(exc):
@@ -144,16 +154,21 @@ def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any
         fields["bias"] = body["bias"]
     if "schedule_time" in body:
         fields["schedule_time"] = _clean_schedule_time(body["schedule_time"])
-    if "stop_type" in body or "stop_value" in body or "stop_limit_offset" in body:
+    if any(key in body for key in ("stop_type", "stop_value", "stop_limit_offset", "stage_trigger_pct", "stage_trail_pct")):
         current = db.get_paper_account(account_id) or {}
         policy = _clean_stop_policy(
             body["stop_type"] if "stop_type" in body else current.get("stop_type"),
             body["stop_value"] if "stop_value" in body else current.get("stop_value"),
             body["stop_limit_offset"] if "stop_limit_offset" in body else current.get("stop_limit_offset"),
+            body.get("stage_trigger_pct", current.get("stage_trigger_pct")),
+            body.get("stage_trail_pct", current.get("stage_trail_pct")),
+            kind=current.get("kind"),
         )
         fields["stop_type"] = policy.stop_type
         fields["stop_value"] = policy.stop_value
         fields["stop_limit_offset"] = policy.stop_limit_offset
+        fields["stage_trigger_pct"] = policy.stage_trigger_pct
+        fields["stage_trail_pct"] = policy.stage_trail_pct
     try:
         db.update_paper_account(account_id=account_id, **fields)
     except Exception as exc:
