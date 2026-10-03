@@ -31,7 +31,7 @@ from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import account_policy, options_data
+from . import account_policy, db, options_data
 from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
@@ -154,9 +154,12 @@ def effective_stop_level(
     (the daily allocator backstop — no interval notion, so prev_mark is None)
     and options_engine._apply_intraday_stops (the hourly refresh, which passes
     the pre-refresh mark so a level crossed this interval fills AT the level).
-    `armed` comes from the position's stop_triggered_at column (stop-limit
+    Staged evaluations save the ratchet under a short DB writer transaction;
+    other stop types remain pure. `armed` comes from stop_triggered_at (stop-limit
     resting fill).
     """
+    if policy.stop_type == "trailing_staged" and pos.get("id") is not None:
+        return db.evaluate_staged_options_stop(pos, policy, prev_mark)
     return account_policy.evaluate(
         policy,
         entry=float(pos.get("entry_premium") or 0),
@@ -164,6 +167,7 @@ def effective_stop_level(
         mark=_mark(pos),
         prev_mark=prev_mark,
         armed=bool(pos.get("stop_triggered_at")),
+        stop_level_hwm=pos.get("stop_level_hwm"),
     )
 
 

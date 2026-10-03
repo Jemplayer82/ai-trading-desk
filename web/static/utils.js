@@ -96,11 +96,47 @@ function stopFieldVisibility(prefix) {
   const valueLabel = document.getElementById(prefix + "-stop-value-label");
   if (valueWrap) { valueWrap.hidden = (type === "none"); valueWrap.style.display = (type === "none") ? "none" : ""; }
   if (offsetWrap) { offsetWrap.hidden = (type !== "stop_limit"); offsetWrap.style.display = (type !== "stop_limit") ? "none" : ""; }
+  for (const field of ["stage-trigger", "stage-trail"]) {
+    const wrap = document.getElementById(prefix + "-" + field + "-wrap");
+    if (wrap) { wrap.hidden = type !== "trailing_staged"; wrap.style.display = wrap.hidden ? "none" : ""; }
+  }
+  const stageHelp = document.getElementById(prefix + "-stage-help");
+  if (stageHelp) { stageHelp.hidden = type !== "trailing_staged"; }
+  if (type === "trailing_staged") {
+    for (const [field, value] of [["stop-value", 20], ["stage-trigger", 20], ["stage-trail", 10]]) {
+      const input = document.getElementById(prefix + "-" + field);
+      if (input && input.value === "") input.value = value;
+    }
+  }
+  updateStagedStopExplanation(prefix);
   if (valueLabel) {
     valueLabel.textContent = type === "trailing_dollar" ? "Trail amount ($)"
-      : type === "trailing_pct" ? "Trail below peak (%)"
+      : (type === "trailing_pct" || type === "trailing_staged") ? "Trail below peak (%)"
       : "Stop below entry (%)";
   }
+}
+
+/** Plain-text staged explanation shared by the form and dashboard. */
+function stagedStopSentence(baseValue, triggerValue, trailValue) {
+  const values = [baseValue, triggerValue, trailValue];
+  const [base, trigger, trail] = values.map(Number);
+  if (values.some(v => v == null || String(v).trim() === "") ||
+      ![base, trigger, trail].every(Number.isFinite) ||
+      base <= 0 || base >= 100 || trigger <= 0 || trail < 1 || trail > 99) {
+    return "Enter the three numbers to see how this stop works.";
+  }
+  const sentence = `Sells if the price falls ${base}% from its highest point. Once the trade is up ${trigger}%, it sells if it falls ${trail}% from its highest point.`;
+  return sentence + (trail > base ? " A looser setting never lowers a stop the trade has already reached." : "");
+}
+
+function updateStagedStopExplanation(prefix) {
+  const explanation = document.getElementById(prefix + "-stage-explanation");
+  if (!explanation) return;
+  explanation.hidden = document.getElementById(prefix + "-stop-type")?.value !== "trailing_staged";
+  explanation.textContent = stagedStopSentence(
+    document.getElementById(prefix + "-stop-value")?.value,
+    document.getElementById(prefix + "-stage-trigger")?.value,
+    document.getElementById(prefix + "-stage-trail")?.value);
 }
 
 /**
@@ -114,6 +150,7 @@ function stopSummary(a) {
   const v = a.stop_value;
   if (t === "stop") return `stop ${escapeHtml(v)}%`;
   if (t === "stop_limit") return `stop ${escapeHtml(v)}% / limit ${escapeHtml(a.stop_limit_offset ?? 0)}%`;
+  if (t === "trailing_staged") return escapeHtml(stagedStopSentence(v, a.stage_trigger_pct, a.stage_trail_pct));
   if (t === "trailing_pct") return `trail ${escapeHtml(v)}%`;
   if (t === "trailing_dollar") return `trail $${escapeHtml(v)}`;
   return escapeHtml(t);

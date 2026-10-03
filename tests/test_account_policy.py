@@ -37,7 +37,7 @@ def test_parse_hhmm_rejects(raw):
 
 
 def test_stop_types_constant():
-    assert ap.STOP_TYPES == ("none", "stop", "stop_limit", "trailing_pct", "trailing_dollar")
+    assert ap.STOP_TYPES == ("none", "stop", "stop_limit", "trailing_pct", "trailing_dollar", "trailing_staged")
 
 
 def test_none_policy_constant():

@@ -253,7 +253,9 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     schedule_time TEXT,
     stop_type TEXT NOT NULL DEFAULT 'none',
     stop_value REAL,
-    stop_limit_offset REAL
+    stop_limit_offset REAL,
+    stage_trigger_pct REAL,
+    stage_trail_pct REAL
 );
 
 -- One row per paper option contract position over its whole life. Unlike the
@@ -299,6 +301,7 @@ CREATE TABLE IF NOT EXISTS options_positions (
     data_source TEXT,
     exit_underlying REAL,
     exit_underlying_source TEXT,
+    stop_level_hwm REAL,
     stop_triggered_at TEXT  -- set when a stop-limit trigger fired but the mark gapped below the limit price, so a resting fill is still pending
 );
 
@@ -372,6 +375,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Trailing stop: highest premium ever marked (seeded at entry). Enables
     # "lock gains once armed" without a full mark-history table.
     ("options_positions", "peak_premium", "REAL"),
+    ("options_positions", "stop_level_hwm", "REAL"),
     # Same-day deep-dive reuse: shared-stage config fingerprint (see
     # web/spy_scanner.py _deep_dive_fingerprint) + provenance pointer to the
     # donor analysis a row's portfolio-manager rerun was based on.
@@ -392,6 +396,8 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("paper_accounts", "stop_type", "TEXT NOT NULL DEFAULT 'none'"),
     ("paper_accounts", "stop_value", "REAL"),
     ("paper_accounts", "stop_limit_offset", "REAL"),
+    ("paper_accounts", "stage_trigger_pct", "REAL"),
+    ("paper_accounts", "stage_trail_pct", "REAL"),
     # Stop-limit arm timestamp: trigger fired but the mark gapped through the
     # limit price, so a resting fill is still pending.
     ("options_positions", "stop_triggered_at", "TEXT"),
@@ -1711,6 +1717,7 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
 _PAPER_ACCOUNT_COLUMNS = (
     "id", "name", "starting_capital", "aggressiveness", "bias", "created_at",
     "kind", "schedule_time", "stop_type", "stop_value", "stop_limit_offset",
+    "stage_trigger_pct", "stage_trail_pct",
 )
 _PAPER_ACCOUNT_SELECT = ", ".join(_PAPER_ACCOUNT_COLUMNS)
 
@@ -1725,6 +1732,8 @@ def create_paper_account(
     stop_type: str = "none",
     stop_value: float | None = None,
     stop_limit_offset: float | None = None,
+    stage_trigger_pct: float | None = None,
+    stage_trail_pct: float | None = None,
 ) -> int:
     """Create a named paper account. Raises sqlite3.IntegrityError if name exists.
 
@@ -1732,11 +1741,11 @@ def create_paper_account(
     """
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, starting_capital, aggressiveness, bias,
              datetime.utcnow().isoformat(timespec="seconds") + "Z", kind,
-             schedule_time, stop_type, stop_value, stop_limit_offset),
+             schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct),
         )
         return int(cur.lastrowid)
 
@@ -1774,6 +1783,8 @@ def update_paper_account(
     stop_type: str | Any = UNSET,
     stop_value: float | None | Any = UNSET,
     stop_limit_offset: float | None | Any = UNSET,
+    stage_trigger_pct: float | None | Any = UNSET,
+    stage_trail_pct: float | None | Any = UNSET,
 ) -> bool:
     """Update one or more paper_account columns. Pass None to NULL a column;
     omit the argument (or pass UNSET) to leave it untouched. Returns True if
@@ -1796,6 +1807,10 @@ def update_paper_account(
         sets.append("stop_value = ?"); vals.append(stop_value)
     if stop_limit_offset is not UNSET:
         sets.append("stop_limit_offset = ?"); vals.append(stop_limit_offset)
+    if stage_trigger_pct is not UNSET:
+        sets.append("stage_trigger_pct = ?"); vals.append(stage_trigger_pct)
+    if stage_trail_pct is not UNSET:
+        sets.append("stage_trail_pct = ?"); vals.append(stage_trail_pct)
     if not sets:
         return True
     vals.append(account_id)
@@ -2087,6 +2102,7 @@ def mark_options_position(
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     stale_sql = ", stale_count = 0" if reset_stale else ", stale_count = stale_count + 1"
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "UPDATE options_positions SET current_premium = ?, current_value = ?, "
             "peak_premium = MAX(COALESCE(peak_premium, entry_premium), ?), "
@@ -2094,6 +2110,48 @@ def mark_options_position(
             (round(float(premium), 4), round(float(value), 2), round(float(premium), 4),
              now, price_source, position_id),
         )
+
+        # Persist the staged ratchet on every mark, including carried marks.
+        # Stop execution still belongs to the existing fresh-quote/DTE paths.
+        from web import account_policy
+        row = conn.execute("SELECT * FROM options_positions WHERE id = ? AND status = 'open'", (position_id,)).fetchone()
+        if row is not None:
+            account = conn.execute("SELECT * FROM paper_accounts WHERE id = ?", (row["paper_account_id"],)).fetchone()
+            policy = account_policy.StopPolicy.from_account(dict(account) if account else None)
+            if policy.stop_type == "trailing_staged":
+                _evaluate_staged_stop(conn, dict(row), policy)
+        conn.commit()
+
+
+def _evaluate_staged_stop(conn, pos, policy, prev_mark=None):
+    """Compute and save under the writer transaction; evaluate() owns the rule."""
+    from web import account_policy
+    stored = conn.execute("SELECT peak_premium, stop_level_hwm FROM options_positions WHERE id = ?", (pos["id"],)).fetchone()
+    previous_level = pos.get("stop_level_hwm")
+    peak = max(float(pos.get("peak_premium") or 0), float(pos.get("current_premium") or 0))
+    if stored is not None:
+        peak = max(peak, float(stored["peak_premium"] or 0))
+        if stored["stop_level_hwm"] is not None:
+            previous_level = max(previous_level or 0, stored["stop_level_hwm"])
+    outcome = account_policy.evaluate(
+        policy, entry=pos["entry_premium"], peak=peak,
+        mark=pos.get("current_premium") if pos.get("current_premium") is not None else pos["entry_premium"],
+        prev_mark=prev_mark, stop_level_hwm=previous_level,
+    )
+    conn.execute(
+        "UPDATE options_positions SET stop_level_hwm = MAX(COALESCE(stop_level_hwm, ?), ?) "
+        "WHERE id = ? AND status = 'open'", (outcome.level, outcome.level, pos["id"]),
+    )
+    return outcome
+
+
+def evaluate_staged_options_stop(pos, policy, prev_mark=None):
+    """Serialize ratchet reads/writes across hourly and daily workers."""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        outcome = _evaluate_staged_stop(conn, pos, policy, prev_mark)
+        conn.commit()
+        return outcome
 
 
 def arm_options_stop_limit(position_id: int, when: str | None = None) -> bool:

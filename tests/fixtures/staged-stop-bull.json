@@ -1,0 +1,316 @@
+{
+  "note": "Read-only bull account 1, IDs 1/2/3; 18 daily bid/ask observations through latest 5/10/40 exit; daily midpoint observation and next-session bid exit. No P&L copied.",
+  "sources": [
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/manifest.json",
+      "sha256": "fc849ea5525d12df6ced222e223af6e2f3a3a4eaf8f6f0c850426d1602f942ca"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/Q-2026-07-20.parquet",
+      "sha256": "ece0e565504fcc7b0357a4487c75e6d283392bb78f988335418bbed03c9fba26"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/Q-2026-07-21.parquet",
+      "sha256": "cc2fe66238343477bb139a69bec5d546403eb2156543bf190287082fdbe4fa4b"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/Q-2026-07-22.parquet",
+      "sha256": "374064f307c9887c17acbf954fda6c44fedbe4e075fa34f7cda8b1424589b237"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/Q-2026-07-23.parquet",
+      "sha256": "b8732f15b7ce4651544cd68f414fc4950ff5867925171733b0a6350c15cc0ceb"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/QCOM-2026-07-21.parquet",
+      "sha256": "950349d59f703e2753fa13106d30992b2f032e10147972f453591b6195bc7aa8"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/QCOM-2026-07-22.parquet",
+      "sha256": "834b8db2cfa2d4a79a9ffcf6ebcf6d68fc74d3444480ae0a043de34fbde58d89"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/QCOM-2026-07-23.parquet",
+      "sha256": "0ef0bdf42d4f455bf7878800ff04802ee9dddd01f38734e4564c901e11636b9d"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/QCOM-2026-07-24.parquet",
+      "sha256": "4efee9cb0205896ce2956029f5e51f43c8e8b87be96ae145180c8b3c0f9519b3"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-20.parquet",
+      "sha256": "59d188f859e879950082e9ce1b5665fabbc25ce1840db910d7017a1a0a35fe28"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-21.parquet",
+      "sha256": "9ca81eba7f66059152ccd7b3dc017ca21b74adc4e0b762892e232902c8141ac6"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-22.parquet",
+      "sha256": "49da5d7f31198417988d05d40d4f5b45c5c0fa50017f9438f15e0e80cae22489"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-23.parquet",
+      "sha256": "6e428e65d9d6311ffda6353528bc9a775e8fe49a31ab74bb0b4a89643167739d"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-24.parquet",
+      "sha256": "42c6a1719802ab28294080bed7c22bef2c8ded58dbb1457b05f2b105055e0bba"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-27.parquet",
+      "sha256": "cb29e705122ed2addda42231ff2819e703f90857cb06439d872a0e4b73a62805"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-28.parquet",
+      "sha256": "a2607794a9b2d8f826aba337157de54645e34cf538410f7e39e9fe5c9b0925d9"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-29.parquet",
+      "sha256": "98652d6558150a83790df9e799291f4f0c5982fd506b6fe8309a1fc323d49a9c"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-30.parquet",
+      "sha256": "b39a78ea37629fd347794f764a066d5ed0439ade044b9c2c0f998ef8e0b9327e"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/docs/validation/desk-trail-input-manifest.json",
+      "sha256": "03418ea7a5c1e578110841f37ae2300f6790682805c5db9645f61e713e19ea04"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/docs/validation/desk-trail-needed-pairs.json",
+      "sha256": "3f2967c3318ab67791468f7f846f1d94d2797a5860489a36e33b0275e2b07efe"
+    },
+    {
+      "path": "/home/landon/quant-status/desk-export/options_positions-20261002.json",
+      "sha256": "d423ec50dd0c7602de95cf01e2207094805c403dff5a52b2fd57bfa2eef69a57"
+    },
+    {
+      "path": "/home/landon/quant-status/runs/ds/desk-trail-result.json",
+      "sha256": "a3a65b544e636c6f6518ce1e1d7141d6fc81e668fad55511fa48e836001263f0"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/data/desk-trail/quotes/TRV-2026-07-31.parquet",
+      "sha256": "4aaecd3b7b209a3e6f6950c57ca452e2527def6beba89d53deebf29123b9df59"
+    },
+    {
+      "path": "/home/landon/.codex/worktrees/quant-desk-trail-20261002/quant/research/desk_trail_replay.py",
+      "sha256": "470f32915a8359dae7c86eface1f0481aea61af036c205b542e107ec2182282d"
+    }
+  ],
+  "trades": [
+    {
+      "entry_id": "1",
+      "put_call": "PUT",
+      "occ_symbol": "Q     260821P00135000",
+      "entry_premium": 12.8,
+      "quotes": [
+        {
+          "session": 0,
+          "date": "2026-07-20",
+          "bid": 13.9,
+          "ask": 14.8
+        },
+        {
+          "session": 1,
+          "date": "2026-07-21",
+          "bid": 11.2,
+          "ask": 12.0
+        },
+        {
+          "session": 2,
+          "date": "2026-07-22",
+          "bid": 10.2,
+          "ask": 12.1
+        },
+        {
+          "session": 3,
+          "date": "2026-07-23",
+          "bid": 10.0,
+          "ask": 12.1
+        }
+      ],
+      "expected_trigger_session": 2,
+      "expected_exit_session": 3,
+      "expected_level": 11.480000000000002,
+      "switched": false,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        },
+        "10": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        },
+        "40": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-23",
+          "final_stop_level": 11.480000000000002,
+          "switched": false
+        }
+      }
+    },
+    {
+      "entry_id": "2",
+      "put_call": "CALL",
+      "occ_symbol": "TRV   260821C00370000",
+      "entry_premium": 10.3,
+      "quotes": [
+        {
+          "session": 0,
+          "date": "2026-07-20",
+          "bid": 9.5,
+          "ask": 11.1
+        },
+        {
+          "session": 1,
+          "date": "2026-07-21",
+          "bid": 9.5,
+          "ask": 10.2
+        },
+        {
+          "session": 2,
+          "date": "2026-07-22",
+          "bid": 10.7,
+          "ask": 11.7
+        },
+        {
+          "session": 3,
+          "date": "2026-07-23",
+          "bid": 12.8,
+          "ask": 14.4
+        },
+        {
+          "session": 4,
+          "date": "2026-07-24",
+          "bid": 20.9,
+          "ask": 24.2
+        },
+        {
+          "session": 5,
+          "date": "2026-07-27",
+          "bid": 22.7,
+          "ask": 25.4
+        },
+        {
+          "session": 6,
+          "date": "2026-07-28",
+          "bid": 29.0,
+          "ask": 32.0
+        },
+        {
+          "session": 7,
+          "date": "2026-07-29",
+          "bid": 20.7,
+          "ask": 23.2
+        },
+        {
+          "session": 8,
+          "date": "2026-07-30",
+          "bid": 10.4,
+          "ask": 13.9
+        },
+        {
+          "session": 9,
+          "date": "2026-07-31",
+          "bid": 10.0,
+          "ask": 12.5
+        }
+      ],
+      "expected_trigger_session": 7,
+      "expected_exit_session": 8,
+      "expected_level": 27.45,
+      "switched": true,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 7,
+          "exit_session": 8,
+          "exit_date": "2026-07-30",
+          "final_stop_level": 28.974999999999998,
+          "switched": true
+        },
+        "10": {
+          "trigger_session": 7,
+          "exit_session": 8,
+          "exit_date": "2026-07-30",
+          "final_stop_level": 27.45,
+          "switched": true
+        },
+        "40": {
+          "trigger_session": 8,
+          "exit_session": 9,
+          "exit_date": "2026-07-31",
+          "final_stop_level": 18.3,
+          "switched": true
+        }
+      }
+    },
+    {
+      "entry_id": "3",
+      "put_call": "CALL",
+      "occ_symbol": "QCOM  260814C00180000",
+      "entry_premium": 10.525,
+      "quotes": [
+        {
+          "session": 0,
+          "date": "2026-07-21",
+          "bid": 10.0,
+          "ask": 10.8
+        },
+        {
+          "session": 1,
+          "date": "2026-07-22",
+          "bid": 10.6,
+          "ask": 12.45
+        },
+        {
+          "session": 2,
+          "date": "2026-07-23",
+          "bid": 8.25,
+          "ask": 9.3
+        },
+        {
+          "session": 3,
+          "date": "2026-07-24",
+          "bid": 5.9,
+          "ask": 6.95
+        }
+      ],
+      "expected_trigger_session": 2,
+      "expected_exit_session": 3,
+      "expected_level": 9.219999999999999,
+      "switched": false,
+      "expected_by_trail": {
+        "5": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        },
+        "10": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        },
+        "40": {
+          "trigger_session": 2,
+          "exit_session": 3,
+          "exit_date": "2026-07-24",
+          "final_stop_level": 9.219999999999999,
+          "switched": false
+        }
+      }
+    }
+  ]
+}

@@ -645,12 +645,14 @@ def run_options_allocation(scan_id: int, trade_date: str) -> None:
         except Exception:
             log.exception("[options %s] lessons context failed — allocating without it", scan_id)
 
+        # Research can wait for hours; account edits must reach the next evaluation.
+        current_stop_policy = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
         with _phase("Options allocation failed"):
             alloc = options_allocator.run(
                 candidates, open_positions, ctx.trade_date, ctx.config,
                 equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
                 aggressiveness=ctx.aggressiveness, bias=ctx.bias, fresh_signals=fresh_signals,
-                lessons_context=lessons_context, policy=stop_policy,
+                lessons_context=lessons_context, policy=current_stop_policy,
             )
 
         # Learning loop, write side: today's chain data carries the underlying spot

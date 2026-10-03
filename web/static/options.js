@@ -133,6 +133,8 @@ function populateOptAccountForm(acct) {
   if ($("opt-new-stop-type")) $("opt-new-stop-type").value = acct.stop_type || "none";
   if ($("opt-new-stop-value")) $("opt-new-stop-value").value = acct.stop_value == null ? "" : acct.stop_value;
   if ($("opt-new-stop-offset")) $("opt-new-stop-offset").value = acct.stop_limit_offset == null ? "" : acct.stop_limit_offset;
+  if ($("opt-new-stage-trigger")) $("opt-new-stage-trigger").value = acct.stage_trigger_pct == null ? "" : acct.stage_trigger_pct;
+  if ($("opt-new-stage-trail")) $("opt-new-stage-trail").value = acct.stage_trail_pct == null ? "" : acct.stage_trail_pct;
   stopFieldVisibility("opt-new");
 }
 
@@ -167,6 +169,17 @@ async function saveOptAccount() {
   const stopValue = ($("opt-new-stop-value") || {}).value || "";
   const stopOffset = ($("opt-new-stop-offset") || {}).value || "";
 
+  const stageTrigger = parseFloat(($("opt-new-stage-trigger") || {}).value);
+  const stageTrail = parseFloat(($("opt-new-stage-trail") || {}).value);
+  if (stopType === "trailing_staged") {
+    const base = parseFloat(stopValue);
+    if (!Number.isFinite(base) || base <= 0 || base >= 100 ||
+        !Number.isFinite(stageTrigger) || stageTrigger <= 0 ||
+        !Number.isFinite(stageTrail) || stageTrail < 1 || stageTrail > 99) {
+      alert("Staged stop needs a base trail below 100%, a positive gain trigger, and a stage trail from 1% through 99%.");
+      return;
+    }
+  }
   if (stopType !== "none") {
     const sv = parseFloat(stopValue);
     if (isNaN(sv) || sv <= 0) { alert("Enter a positive stop value."); return; }
@@ -186,6 +199,8 @@ async function saveOptAccount() {
     stop_type: stopType,
     stop_value: stopType === "none" ? null : parseFloat(stopValue),
     stop_limit_offset: stopType === "stop_limit" ? parseFloat(stopOffset) : null,
+    stage_trigger_pct: stopType === "trailing_staged" ? stageTrigger : null,
+    stage_trail_pct: stopType === "trailing_staged" ? stageTrail : null,
   });
   try {
     if (editingOptAccountId) {
@@ -1008,6 +1023,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const createBtn = $("btn-create-opt-account");
   if (createBtn) createBtn.addEventListener("click", saveOptAccount);
   document.getElementById("opt-new-stop-type")?.addEventListener("change", () => stopFieldVisibility("opt-new"));
+  for (const field of ["stop-value", "stage-trigger", "stage-trail"]) {
+    document.getElementById("opt-new-" + field)?.addEventListener("input", () => updateStagedStopExplanation("opt-new"));
+  }
 
   const aggSlider = $("opt-new-agg");
   if (aggSlider) {
