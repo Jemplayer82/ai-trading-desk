@@ -1023,6 +1023,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const createBtn = $("btn-create-opt-account");
   if (createBtn) createBtn.addEventListener("click", saveOptAccount);
   document.getElementById("opt-new-stop-type")?.addEventListener("change", () => stopFieldVisibility("opt-new"));
+  for (const field of ["stop-value", "stage-trigger", "stage-trail"]) {
+    document.getElementById("opt-new-" + field)?.addEventListener("input", () => updateStagedStopExplanation("opt-new"));
+  }
 
   const aggSlider = $("opt-new-agg");
   if (aggSlider) {

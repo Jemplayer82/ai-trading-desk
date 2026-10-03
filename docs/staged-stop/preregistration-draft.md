@@ -32,6 +32,15 @@ This draft requires claude-quant review before a forward experiment is signed.
   parameters. Any discretionary edit must be logged and ends the fixed-policy
   comparison interval. Trigger edits re-evaluate stage membership from peak.
 
+## Round 3 UI assumptions
+
+The live explanation follows the existing policy bounds: base >0 and <100,
+trigger >0 without an upper cap, and stage trail 1–99 inclusive. Fractional
+values are displayed as numbers. Blank or invalid values show the placeholder;
+input events never restore a cleared value. Defaults are populated on selecting
+the staged policy or loading the form, as before. The shared dashboard sentence
+also shows the placeholder for malformed persisted staged parameters.
+
 ## Round 2 amendment
 
 Any after-trigger trail from 1 to 99 is allowed. Candidate levels use base before

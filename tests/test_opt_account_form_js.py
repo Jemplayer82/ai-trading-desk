@@ -371,7 +371,8 @@ def test_staged_form_edit_and_hide_clears_payload():
         })();
     """)
     assert [float(x) for x in result['values']] == [25, 30, 15]
-    assert result['summary'] == 'trail 25%; once up 30%, trail 15%'
+    assert result['summary'] == ('Sells if the price falls 25% from its highest point. '
+                                 'Once the trade is up 30%, it sells if it falls 15% from its highest point.')
     assert result['hidden'] == [True, True]
     assert result['body']['stage_trigger_pct'] is None
     assert result['body']['stage_trail_pct'] is None
@@ -406,3 +407,70 @@ def test_staged_form_accepts_after_trigger_amount(trail):
         })();
     """.replace('TRAIL', str(trail)))
     assert result == trail
+
+
+def test_staged_live_sentence_create_edit_input_events_and_hiding():
+    result = _run("""
+        document.__fire('DOMContentLoaded', {});
+        resetOptAccountForm();
+        const explanation = document.getElementById('opt-new-stage-explanation');
+        const initiallyHidden = explanation.hidden;
+        const type = document.getElementById('opt-new-stop-type');
+        type.value = 'trailing_staged';
+        type.__fire('change', {});
+        const created = {text: explanation.textContent, hidden: explanation.hidden};
+        const snapshots = [];
+        for (const [field, value] of [['stop-value','25'], ['stage-trigger','30'],
+                                      ['stage-trail','40'], ['stage-trail',''], ['stage-trail','10']]) {
+            const input = document.getElementById('opt-new-' + field);
+            input.value = value;
+            input.__fire('input', {});
+            snapshots.push(explanation.textContent);
+        }
+        optAccounts = [{id:7,name:'Edit',stop_type:'trailing_staged',stop_value:12.5,
+                       stage_trigger_pct:150,stage_trail_pct:12.5}];
+        document.getElementById('opt-new-name').focus = () => {};
+        editOptAccount(7);
+        const edited = explanation.textContent;
+        const summary = stopSummary(optAccounts[0]);
+        type.value = 'stop';
+        type.__fire('change', {});
+        return {initiallyHidden, created, snapshots, edited, summary, finallyHidden:explanation.hidden};
+    """)
+    assert result['initiallyHidden'] and result['finallyHidden']
+    assert result['created'] == {'hidden': False, 'text': (
+        'Sells if the price falls 20% from its highest point. '
+        'Once the trade is up 20%, it sells if it falls 10% from its highest point.')}
+    assert result['snapshots'] == [
+        'Sells if the price falls 25% from its highest point. Once the trade is up 20%, it sells if it falls 10% from its highest point.',
+        'Sells if the price falls 25% from its highest point. Once the trade is up 30%, it sells if it falls 10% from its highest point.',
+        'Sells if the price falls 25% from its highest point. Once the trade is up 30%, it sells if it falls 40% from its highest point. A looser setting never lowers a stop the trade has already reached.',
+        'Enter the three numbers to see how this stop works.',
+        'Sells if the price falls 25% from its highest point. Once the trade is up 30%, it sells if it falls 10% from its highest point.',
+    ]
+    assert result['edited'] == result['summary'] == (
+        'Sells if the price falls 12.5% from its highest point. '
+        'Once the trade is up 150%, it sells if it falls 12.5% from its highest point.')
+
+
+@pytest.mark.parametrize(('base', 'trigger', 'trail'), [
+    ('', '20', '10'), ('20', '', '10'), ('20', '20', ''),
+    ('0', '20', '10'), ('100', '20', '10'), ('20', '0', '10'),
+    ('20', '20', '0.99'), ('20', '20', '99.01'), ('NaN', '20', '10'),
+    ('20', 'Infinity', '10'), ('20', '20', '10junk'), ('20', None, '10'),
+])
+def test_staged_sentence_invalid_values_and_dashboard_placeholder(base, trigger, trail):
+    import json
+
+    result = _run('const values = ' + json.dumps([base, trigger, trail]) + ";" + """
+        return [stagedStopSentence(...values), stopSummary({stop_type:'trailing_staged',
+            stop_value:values[0],stage_trigger_pct:values[1],stage_trail_pct:values[2]})];
+    """)
+    assert result == ['Enter the three numbers to see how this stop works.'] * 2
+
+
+@pytest.mark.parametrize('trail', [1, 99])
+def test_staged_sentence_inclusive_stage_bounds(trail):
+    result = _run(f"return stagedStopSentence(20, 20, {trail});")
+    assert f'falls {trail}% from its highest point.' in result
+    assert ('A looser setting' in result) == (trail > 20)

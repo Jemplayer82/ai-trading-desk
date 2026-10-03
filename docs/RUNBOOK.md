@@ -23,8 +23,10 @@ are thin evidence and do not establish future profitability.
    `stage_trail_pct REAL` to existing paper_accounts, plus `stop_level_hwm REAL`
    to options_positions, all with NULL defaults. There is no staged backfill, table rewrite or account modification. Verify the three
    columns and existing account policy snapshots before enabling the experiment.
-5. Check the Options form offers staged trail, editing an existing account
-   renders its unchanged policy, and the new account summary shows 20/20/10.
+5. Check the Options form offers “Trailing, then adjustable”, editing an existing
+   account renders its unchanged policy, and the new account summary shows 20/20/10.
+   On both create and edit, check the explanation below the three staged boxes
+   updates as any value changes and matches the dashboard summary.
    Use an isolated staging account first to check save/round-trip behavior.
 
 Rollback: return all services to the prior image. Added NULL columns can remain;
@@ -40,14 +42,15 @@ or rewrite the production DB as part of rollback.
 - In Options → account form, create a distinct account named `Bull staged 10%`.
   Copy bull's bias, aggressiveness and starting capital exactly. Use the same
   schedule/cadence (or leave both manual during setup and enroll them together).
-- Select “Staged trailing % (change after gain trigger)”; set base trail **20**, gain
+- Select “Trailing, then adjustable”; set base trail **20**, gain
   trigger **20**, trail after trigger **10**. Save and verify the account summary.
 - Do not edit bull/bear/small, copy old positions or backdate enrollment. Record
   the new ID and full API policy snapshot before its first scan.
 
-For this policy: “Sells if the price falls 20% from its highest point; once the
-position is up 20%, the trail becomes 10% below the highest point. The saved stop
-level never falls.” Calls and puts use option premium, not underlying direction.
+For this policy, the form's live explanation and dashboard summary read:
+“Sells if the price falls 20% from its highest point. Once the trade is up 20%,
+it sells if it falls 10% from its highest point.” Calls and puts use option
+premium, not underlying direction.
 The saved highest stop level persists through pullbacks and account edits. NULL
 on old rows initializes at the current peak and settings on the next evaluation;
 historical levels are not reconstructed. Stale marks and the DTE floor retain
@@ -57,7 +60,15 @@ their existing behavior; exit reporting uses `trail_stop`.
 
 In Options, edit the account and save the base trail, gain trigger and trail
 after trigger. The latter accepts any value from **1 to 99**, tighter or looser
-than the base. Changes apply to every open position at its next evaluation.
+than the base. On create and edit, the plain-English explanation below the three
+boxes rewrites itself as the base trail, gain trigger or trail after trigger
+changes. If the trail after trigger exceeds the base trail, it adds:
+“A looser setting never lowers a stop the trade has already reached.” Blank or
+invalid numbers show “Enter the three numbers to see how this stop works.”
+The explanation is hidden for other stop types. The dashboard summary uses
+the same sentence builder.
+
+Changes apply to every open position at its next evaluation.
 A tighter setting raises the stop immediately at that check and can close a
 position; a looser setting never lowers a stop already reached. A 40% stage
 trail after a 20% base therefore preserves the prior stop until a higher peak

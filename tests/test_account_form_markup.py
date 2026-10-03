@@ -163,3 +163,15 @@ def test_staged_form_bounds_and_edit_help():
     assert re.search(r'id="opt-new-stage-trail" min="1" max="99"', html)
     assert 'Edits apply to open positions at the next price check.' in html
     assert 'a looser setting never lowers a stop already reached' in html
+
+
+def test_staged_live_explanation_markup_and_dropdown_name():
+    html = (ROOT / 'web/static/index.html').read_text(encoding='utf-8')
+    if not (ROOT / 'web/static/options.js').exists():
+        assert 'opt-new-stage-explanation' not in html
+        return
+    _assert_id_in_tier_block(html, 'opt-new-stage-explanation', 4)
+    assert '<option value="trailing_staged">Trailing, then adjustable</option>' in html
+    assert html.count('id="opt-new-stage-explanation"') == 1
+    assert re.search(r'id="opt-new-stage-explanation" hidden[^>]*aria-live="polite"', html)
+    assert html.index('id="opt-new-stage-trail"') < html.index('id="opt-new-stage-explanation"')
