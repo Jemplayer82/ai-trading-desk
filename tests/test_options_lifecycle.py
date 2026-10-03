@@ -1,5 +1,5 @@
 """Lifecycle tests for the options paper trader: DB migrations, the cash
-ledger's transactional invariants, expiry settlement idempotency, and the
+ledger's transactional invariants, expiry bid liquidation idempotency, and the
 kind-scoped scan queries."""
 
 import sqlite3
@@ -37,6 +37,9 @@ def _pos_dict(**over):
         "entry_bid": 4.10, "entry_ask": 4.30, "entry_oi": 1500,
         "signal": "BUY", "conviction": 8, "rationale": "test", "data_source": "schwab",
     }
+    if "entry_premium" in over:
+        # Tests pass the desired stop reference; entry execution crosses the spread.
+        base.update(entry_bid=over["entry_premium"], entry_ask=over["entry_premium"] + 0.2)
     base.update(over)
     return base
 
@@ -178,43 +181,45 @@ def test_close_with_exit_underlying_roundtrip(account_id):
 def test_open_close_ledger_flow(account_id):
     scan = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
     pid = db.open_options_position(account_id, scan, _pos_dict())
-    # 2 contracts x $4.20 x 100 = $840 debited.
-    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 840)
+    # 2 contracts x $4.30 ASK x 100 = $860 debited.
+    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 860)
     pos = db.get_options_position(pid)
     assert pos["status"] == "open"
-    assert pos["cost_basis"] == pytest.approx(840)
+    assert pos["cost_basis"] == pytest.approx(860)
 
-    assert db.close_options_position(pid, 5.00, "llm_close", close_scan_id=scan)
-    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 840 + 1000)
+    assert db.close_options_position(pid, 5.00, "llm_close", close_scan_id=scan, exit_bid=5.00)
+    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 860 + 1000)
     pos = db.get_options_position(pid)
     assert pos["status"] == "closed"
-    assert pos["realized_pnl"] == pytest.approx(160)
-    assert db.options_realized_pnl(account_id) == pytest.approx(160)
+    assert pos["realized_pnl"] == pytest.approx(140)
+    assert db.options_realized_pnl(account_id) == pytest.approx(140)
 
     # Closing again is a no-op (no double credit).
     assert not db.close_options_position(pid, 6.00, "llm_close")
-    assert db.options_cash_balance(account_id) == pytest.approx(100_160)
+    assert db.options_cash_balance(account_id) == pytest.approx(100_140)
 
 
 def test_settlement_itm_and_idempotency(account_id):
     scan = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
     pid = db.open_options_position(account_id, scan, _pos_dict())
-    # ITM by $2.50 at expiry: proceeds 2.50 * 100 * 2 = $500.
+    # Intrinsic is ignored; last bid 4.10 * 100 * 2 = $820.
     assert db.settle_options_position(pid, 2.50, settlement_close=232.50)
     pos = db.get_options_position(pid)
-    assert pos["status"] == "expired_itm"
-    assert pos["exit_value"] == pytest.approx(500)
-    assert pos["realized_pnl"] == pytest.approx(500 - 840)
-    assert pos["settlement_close"] == pytest.approx(232.50)
+    assert pos["status"] == "closed"
+    assert pos["exit_reason"] == "expiry"
+    assert pos["exit_value"] == pytest.approx(820)
+    assert pos["realized_pnl"] == pytest.approx(820 - 860)
+    assert pos["settlement_close"] is None
+    assert pos["exit_bid"] == pytest.approx(4.1)
     cash_after = db.options_cash_balance(account_id)
-    assert cash_after == pytest.approx(100_000 - 840 + 500)
+    assert cash_after == pytest.approx(100_000 - 860 + 820)
 
     # Settling twice must not double-credit.
     assert not db.settle_options_position(pid, 2.50, settlement_close=232.50)
     assert db.options_cash_balance(account_id) == pytest.approx(cash_after)
     with db.connect() as conn:
         n = conn.execute(
-            "SELECT COUNT(*) AS n FROM options_cash_ledger WHERE position_id = ? AND kind = 'expire'",
+            "SELECT COUNT(*) AS n FROM options_cash_ledger WHERE position_id = ? AND kind = 'close'",
             (pid,),
         ).fetchone()["n"]
     assert n == 1
@@ -223,12 +228,14 @@ def test_settlement_itm_and_idempotency(account_id):
 def test_settlement_worthless(account_id):
     scan = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
     pid = db.open_options_position(account_id, scan, _pos_dict())
+    db.mark_options_position(pid, 0.0, 0.0, "schwab")
     assert db.settle_options_position(pid, 0.004, settlement_close=229.99)
     pos = db.get_options_position(pid)
-    assert pos["status"] == "expired_worthless"
+    assert pos["status"] == "closed"
+    assert pos["exit_reason"] == "expiry"
     assert pos["exit_value"] == 0
-    assert pos["realized_pnl"] == pytest.approx(-840)
-    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 840)
+    assert pos["realized_pnl"] == pytest.approx(-860)
+    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 860)
 
 
 def test_equity_invariant_across_builds(account_id):
@@ -241,19 +248,20 @@ def test_equity_invariant_across_builds(account_id):
                   put_call="PUT", strike=420.0, entry_premium=6.00, contracts=1),
     )
     scan2 = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
-    db.close_options_position(p1, 5.50, "llm_close", close_scan_id=scan2)
+    db.close_options_position(p1, 5.50, "llm_close", close_scan_id=scan2, exit_bid=5.50)
 
     eq = options_engine.account_equity(account_id)
     open_positions = db.list_options_positions(account_id, status="open")
     assert [p["id"] for p in open_positions] == [p2]
-    assert eq["cash"] == pytest.approx(100_000 - 840 - 600 + 1100)
+    assert eq["cash"] == pytest.approx(100_000 - 860 - 620 + 1100)
+    assert eq["open_value"] == pytest.approx(600)  # liquidation at bid, not ask cost
     assert eq["equity"] == pytest.approx(eq["cash"] + eq["open_value"])
-    assert db.options_realized_pnl(account_id) == pytest.approx(1100 - 840)
+    assert db.options_realized_pnl(account_id) == pytest.approx(1100 - 860)
 
     summary = options_engine.account_summary(account_id)
     assert summary["open_count"] == 1
     assert summary["closed_count"] == 1
-    assert summary["realized_pnl"] == pytest.approx(260)
+    assert summary["realized_pnl"] == pytest.approx(240)
 
 
 def test_mark_options_position(account_id):
@@ -261,12 +269,13 @@ def test_mark_options_position(account_id):
     pid = db.open_options_position(account_id, scan, _pos_dict())
     db.mark_options_position(pid, 5.10, 1020.0, "schwab")
     pos = db.get_options_position(pid)
+    assert pos["current_bid"] == pytest.approx(5.10)
     assert pos["current_premium"] == pytest.approx(5.10)
     assert pos["current_value"] == pytest.approx(1020.0)
     assert pos["price_source"] == "schwab"
     assert pos["stale_count"] == 0
     # Marking does not touch cash.
-    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 840)
+    assert db.options_cash_balance(account_id) == pytest.approx(100_000 - 860)
 
 
 # ── Engine settlement rules ──────────────────────────────────────────────────
@@ -296,6 +305,8 @@ def test_settle_expired_sweep(account_id, monkeypatch):
     scan = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
     due = db.open_options_position(
         account_id, scan, _pos_dict(expiration_date=yesterday))
+    due2 = db.open_options_position(
+        account_id, scan, _pos_dict(occ_symbol="AAPL  260821C00240000", strike=240, expiration_date=yesterday))
     live = db.open_options_position(
         account_id, scan,
         _pos_dict(occ_symbol="MSFT  270115C00420000", underlying="MSFT",
@@ -303,9 +314,13 @@ def test_settle_expired_sweep(account_id, monkeypatch):
     monkeypatch.setattr(options_engine, "underlying_close_on_or_before",
                         lambda u, e: 232.5)
     summary = options_engine.settle_expired(account_id)
-    assert summary["due"] == 1
-    assert summary["settled_itm"] == 1
-    assert db.get_options_position(due)["status"] == "expired_itm"
+    assert summary["due"] == 2
+    assert summary["settled_itm"] == 2
+    due_row = db.get_options_position(due)
+    assert due_row["status"] == "closed"
+    assert due_row["exit_reason"] == "expiry"
+    assert due_row["exit_premium"] == pytest.approx(4.1)
+    assert db.get_options_position(due2)["status"] == "closed"
     assert db.get_options_position(live)["status"] == "open"
 
     # Second sweep finds nothing (idempotent end to end).
@@ -313,15 +328,17 @@ def test_settle_expired_sweep(account_id, monkeypatch):
     assert summary2["due"] == 0
 
 
-def test_settle_expired_missing_close_leaves_open(account_id, monkeypatch):
+def test_settle_expired_missing_underlying_close_uses_last_bid(account_id, monkeypatch):
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     scan = db.create_spy_scan("2026-07-17", paper_account_id=account_id, kind="options")
     pid = db.open_options_position(account_id, scan, _pos_dict(expiration_date=yesterday))
     monkeypatch.setattr(options_engine, "underlying_close_on_or_before", lambda u, e: None)
     summary = options_engine.settle_expired(account_id)
-    assert summary["failed"] == 1
+    assert summary["failed"] == 0
     pos = db.get_options_position(pid)
-    assert pos["status"] == "open"       # never guess a settlement price
+    assert pos["status"] == "closed"
+    assert pos["exit_premium"] == pytest.approx(4.1)
+    assert pos["exit_reason"] == "expiry"
     assert pos["stale_count"] == 1
 
 
@@ -509,10 +526,8 @@ def _freeze_et(monkeypatch, when: datetime) -> None:
     monkeypatch.setattr(options_data, "now_et", lambda: when)
 
 
-def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch):
-    """Prev mark above the stop, fresh quote below it -> the level was crossed
-    this interval, so the fill is AT the stop (standing-stop emulation), not at
-    the (worse) observed quote."""
+def test_intraday_stop_fills_at_observed_bid_when_crossed(account_id, monkeypatch):
+    """Crossing a stop fills at the fresh bid observed at the decision."""
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {s: 230.0 for s in syms})
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # stop = 4.00
     pos = db.get_options_position(pid)
@@ -523,16 +538,12 @@ def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch)
     row = db.get_options_position(pid)
     assert row["status"] == "closed"
     assert row["exit_reason"] == "stop_loss"
-    assert row["exit_premium"] == pytest.approx(4.0)
+    assert row["exit_premium"] == pytest.approx(3.0)
     assert row["exit_underlying"] == pytest.approx(230.0)
 
 
 def test_intraday_stop_gap_fills_at_observed_quote(account_id, monkeypatch):
-    """Previous mark ALREADY below the stop (e.g. stop was disabled or marks
-    were stale while it slid) -> the level wasn't crossed this interval, so
-    fill at the observed quote; pretending we caught $4.00 would be fiction.
-    Note a never-marked position counts as crossed-from-above: open seeds
-    current_premium = entry_premium, which sits above the stop by definition."""
+    """A gap below the fixed stop also fills at the observed bid."""
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid = _open_marked(account_id, entry=10.0, prev_mark=3.9)  # already < 4.00 stop
     pos = db.get_options_position(pid)
@@ -546,7 +557,7 @@ def test_intraday_stop_gap_fills_at_observed_quote(account_id, monkeypatch):
 
 
 def test_intraday_stop_ignores_unpriced_and_healthy(account_id, monkeypatch):
-    """No fresh quote (carried/intrinsic mark) must never realize a loss, and
+    """No fresh quote (carried bid) must never realize a loss, and
     healthy marks above the stop are untouched."""
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid_stale = _open_marked(account_id, entry=10.0, prev_mark=3.0)   # below stop but stale
@@ -573,20 +584,20 @@ def test_intraday_stop_kill_switch(account_id, monkeypatch):
 
 
 def test_intraday_stop_credits_ledger_at_fill(account_id, monkeypatch):
-    """Cash must reflect the STOP-level fill, not the observed quote."""
+    """Cash reflects ask cost and the observed bid proceeds."""
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     before = db.options_cash_balance(account_id)
-    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # debit 10*100*2 = 2000
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # debit 10.2 ask*100*2 = 2040
     pos = db.get_options_position(pid)
     options_engine._apply_intraday_stops(
         [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
     )
     after = db.options_cash_balance(account_id)
-    # net: -2000 open + 4.00*100*2 = 800 close
-    assert after - before == pytest.approx(-2000 + 800)
+    # net: -2040 ask entry + 3.00*100*2 = 600 bid close
+    assert after - before == pytest.approx(-2040 + 600)
 
 
-# ── Stop backtracking: book the sale at the minute the level was crossed ────
+# ── Legacy backtracking helper; bid/ask fills must not use it ─────────────
 
 def _fake_bars(monkeypatch, closes_start, closes_end, minutes=40):
     """Install a fake yf.Ticker serving 1-min bars ending now, linear path."""
@@ -651,9 +662,8 @@ def test_backtrack_degenerate_returns_none(monkeypatch):
     assert options_engine._backtrack_stop_crossing(pos, 5.0, 4.0, 3.0) is None
 
 
-def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
-    """End to end through _apply_intraday_stops: closed_at is the crossing
-    minute, exit_underlying the implied level, source 'backtracked'."""
+def test_stop_does_not_book_backtracked_time_and_spot(account_id, monkeypatch):
+    """The decision uses its observed bid and never fabricated crossing evidence."""
     monkeypatch.setattr(options_engine, "_backtrack_stop_crossing",
                         lambda *a, **k: ("2026-07-29T14:32:00Z", 95.0))
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
@@ -663,10 +673,10 @@ def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
         [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
     ) == 1
     row = db.get_options_position(pid)
-    assert row["closed_at"] == "2026-07-29T14:32:00Z"
-    assert row["exit_underlying"] == pytest.approx(95.0)
-    assert row["exit_underlying_source"] == "backtracked"
-    assert row["exit_premium"] == pytest.approx(4.0)
+    assert row["closed_at"] != "2026-07-29T14:32:00Z"
+    assert row["exit_underlying"] is None
+    assert row["exit_underlying_source"] is None
+    assert row["exit_premium"] == pytest.approx(3.0)
 
 
 # ── Trailing stop: winners ride, but gains lock once armed ───────────────────
@@ -674,7 +684,10 @@ def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
 def test_peak_premium_seeded_and_ratchets(account_id):
     scan = db.create_spy_scan("2026-07-30", paper_account_id=account_id, kind="options")
     pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=10.0))
-    assert db.get_options_position(pid)["peak_premium"] == pytest.approx(10.0)  # seeded at entry
+    row = db.get_options_position(pid)
+    assert row["entry_premium"] == pytest.approx(10.2)  # ask execution
+    assert row["current_bid"] == pytest.approx(10.0)
+    assert row["peak_premium"] == pytest.approx(10.0)  # seeded at entry bid
     db.mark_options_position(pid, 14.0, 2800, "schwab")
     assert db.get_options_position(pid)["peak_premium"] == pytest.approx(14.0)  # ratchets up
     db.mark_options_position(pid, 11.0, 2200, "schwab")
@@ -684,7 +697,7 @@ def test_peak_premium_seeded_and_ratchets(account_id):
 def test_effective_stop_unarmed_is_base():
     from web import options_allocator as oa
     outcome = oa.effective_stop_level(
-        {"entry_premium": 10.0, "peak_premium": 14.9, "current_premium": 3.5},
+        {"entry_premium": 10.2, "entry_bid": 10.0, "current_bid": 3.5, "peak_premium": 14.9, "current_premium": 3.5},
         StopPolicy("stop", 60.0),
     )
     assert outcome.level == pytest.approx(4.0)
@@ -694,7 +707,7 @@ def test_effective_stop_unarmed_is_base():
 def test_effective_stop_armed_locks_gains():
     from web import options_allocator as oa
     outcome = oa.effective_stop_level(
-        {"entry_premium": 10.0, "peak_premium": 20.0},
+        {"entry_premium": 10.2, "entry_bid": 10.0, "current_bid": 3.5, "peak_premium": 20.0},
         StopPolicy("trailing_pct", 30.0),
     )
     assert outcome.exit_reason == "trail_stop"
@@ -704,16 +717,15 @@ def test_effective_stop_armed_locks_gains():
 def test_effective_stop_kill_switch():
     from web import options_allocator as oa
     outcome = oa.effective_stop_level(
-        {"entry_premium": 10.0, "peak_premium": 30.0},
+        {"entry_premium": 10.2, "entry_bid": 10.0, "current_bid": 3.5, "peak_premium": 30.0},
         StopPolicy("none"),
     )
     assert outcome.action == "hold"
     assert outcome.level == 0.0
 
 
-def test_intraday_trail_closes_winner_at_trail_level(account_id, monkeypatch):
-    """Winner peaked +100% then fell through the trail -> closed at the trail
-    level with exit_reason trail_stop; a big win can't round-trip to -60%."""
+def test_intraday_trail_closes_winner_at_observed_bid(account_id, monkeypatch):
+    """Winner peaked +100% then crossed the trail and sells at the observed bid."""
     db.update_paper_account(account_id, stop_type="trailing_pct", stop_value=30)
     monkeypatch.setattr(options_engine, "_backtrack_stop_crossing", lambda *a, **k: None)
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
@@ -726,18 +738,18 @@ def test_intraday_trail_closes_winner_at_trail_level(account_id, monkeypatch):
     assert stopped == 1
     row = db.get_options_position(pid)
     assert row["exit_reason"] == "trail_stop"
-    assert row["exit_premium"] == pytest.approx(14.0)
-    assert row["realized_pnl"] == pytest.approx((14.0 - 10.0) * 100 * 2)  # profit kept
+    assert row["exit_premium"] == pytest.approx(13.5)
+    assert row["realized_pnl"] == pytest.approx((13.5 - 10.2) * 100 * 2)  # profit kept
 
 
 def test_forced_closes_trail():
     from web import options_allocator as oa
     pos = {"id": 1, "occ_symbol": "X", "underlying": "AAPL", "entry_premium": 10.0,
-           "peak_premium": 20.0, "current_premium": 13.0, "contracts": 2,
+           "peak_premium": 20.0, "current_premium": 13.0, "entry_bid": 10.0, "current_bid": 13.0, "contracts": 2,
            "expiration_date": "2099-01-15", "cost_basis": 2000.0}
     out = oa.forced_closes([pos], StopPolicy("trailing_pct", 30.0))
     assert len(out) == 1 and out[0][1] == "trail_stop"
-    healthy = dict(pos, current_premium=15.0)  # above trail 14.0
+    healthy = dict(pos, current_premium=15.0, current_bid=15.0)  # above trail 14.0
     assert oa.forced_closes([healthy], StopPolicy("trailing_pct", 30.0)) == []
 
 
@@ -774,7 +786,7 @@ def test_intraday_none_policy_never_stops(account_id, monkeypatch):
     assert db.get_options_position(pid)["status"] == "open"
 
 
-def test_intraday_trailing_dollar_fills_at_level(account_id, monkeypatch):
+def test_intraday_trailing_dollar_fills_at_observed_bid(account_id, monkeypatch):
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid = _open_marked(account_id, entry=10.0, prev_mark=20.0)  # peak ratchets to 20
     pos = db.get_options_position(pid)
@@ -785,7 +797,7 @@ def test_intraday_trailing_dollar_fills_at_level(account_id, monkeypatch):
     row = db.get_options_position(pid)
     assert row["status"] == "closed"
     assert row["exit_reason"] == "trail_stop"
-    assert row["exit_premium"] == pytest.approx(18.0)
+    assert row["exit_premium"] == pytest.approx(17.5)
 
 
 def test_intraday_stop_limit_gapped_arms_resting(account_id, monkeypatch):
@@ -852,7 +864,7 @@ def test_intraday_stop_limit_crosses_fills_immediately(account_id, monkeypatch):
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
     pos = db.get_options_position(pid)
     # 3.7 is below the 4.00 trigger but still >= the 3.60 limit, so it fills
-    # immediately at the trigger level without ever arming.
+    # immediately at the observed bid without ever arming.
     stopped = options_engine._apply_intraday_stops(
         [pos], {pid: (3.7, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
     )
@@ -860,7 +872,7 @@ def test_intraday_stop_limit_crosses_fills_immediately(account_id, monkeypatch):
     row = db.get_options_position(pid)
     assert row["status"] == "closed"
     assert row["exit_reason"] == "stop_limit"
-    assert row["exit_premium"] == pytest.approx(4.0)
+    assert row["exit_premium"] == pytest.approx(3.7)
     assert row["stop_triggered_at"] is None
 
 
@@ -889,7 +901,7 @@ def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypa
     monkeypatch.setattr(options_engine.schwab_mcp, "market_data_enabled", lambda: True)
 
     def fake_get_quotes(symbols):
-        return {s: {"price": price_map.get(s, 1.0)} for s in symbols}
+        return {s: {"quote": {"bidPrice": price_map.get(s, 1.0), "askPrice": price_map.get(s, 1.0) + 0.2}} for s in symbols}
 
     monkeypatch.setattr(options_engine.schwab_mcp, "get_quotes", fake_get_quotes)
     monkeypatch.setattr(options_engine.schwab_mcp, "option_quote_price", lambda q: q.get("price"))
@@ -924,10 +936,10 @@ def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypa
     row2 = db.get_options_position(pid2)
     assert row1["status"] == "closed"
     assert row1["exit_reason"] == "stop_loss"
-    assert row1["exit_premium"] == pytest.approx(4.0)
+    assert row1["exit_premium"] == pytest.approx(3.0)
     assert row2["status"] == "closed"
     assert row2["exit_reason"] == "trail_stop"
-    assert row2["exit_premium"] == pytest.approx(14.0)
+    assert row2["exit_premium"] == pytest.approx(13.5)
 
 
 def test_staged_intraday_and_daily_share_policy(account_id, monkeypatch):
@@ -945,9 +957,9 @@ def test_staged_intraday_and_daily_share_policy(account_id, monkeypatch):
     assert options_engine._apply_intraday_stops([pos], {pid: (10.5, 'schwab')}, {account_id: policy}) == 1
     row = db.get_options_position(pid)
     assert row['exit_reason'] == 'trail_stop'
-    assert row['exit_premium'] == pytest.approx(10.8)
+    assert row['exit_premium'] == pytest.approx(10.5)
     assert row['peak_premium'] == pytest.approx(12)
-    daily = dict(pos, current_premium=10.5, expiration_date='2099-01-15')
+    daily = dict(pos, current_premium=10.5, current_bid=10.5, expiration_date='2099-01-15')
     closes = options_allocator.forced_closes([daily], policy)
     assert closes == [(daily, 'trail_stop', 10.5)]
     # The unconditional floor retains priority over the staged stop.
@@ -983,7 +995,7 @@ def test_staged_saved_ratchet_and_midtrade_account_edits(account_id, monkeypatch
     assert options_engine._apply_intraday_stops([stale_snapshot], {}, {account_id: loose}) == 0
     assert options_engine._apply_intraday_stops([stale_snapshot], {pid: (12, 'schwab')}, {account_id: loose}) == 1
     row = db.get_options_position(pid)
-    assert (row['status'], row['stop_level_hwm'], row['exit_premium'], row['exit_reason']) == ('closed', 12.35, 12.35, 'trail_stop')
+    assert (row['status'], row['stop_level_hwm'], row['exit_premium'], row['exit_reason']) == ('closed', 12.35, 12.0, 'trail_stop')
 
 
 def test_staged_policy_switch_preserves_ratchet(account_id):

@@ -104,13 +104,18 @@ def test_additive_migration_on_pre_staged_schema(tmp_path, monkeypatch):
     with sqlite3.connect(db.DB_PATH) as conn:
         conn.executescript(db.SCHEMA.replace(',\n    stage_trigger_pct REAL,\n    stage_trail_pct REAL', ''))
         conn.execute("INSERT INTO paper_accounts (name,created_at,kind,stop_type,stop_value) VALUES ('bull','2026-10-02','options','trailing_pct',20)")
-        before = conn.execute('SELECT * FROM paper_accounts').fetchall()
+        before_columns = [c[1] for c in conn.execute('PRAGMA table_info(paper_accounts)')]
+        before = dict(zip(before_columns, conn.execute('SELECT * FROM paper_accounts').fetchone(), strict=True))
     db.init_db()
     db.init_db()
     with sqlite3.connect(db.DB_PATH) as conn:
         columns = conn.execute('PRAGMA table_info(paper_accounts)').fetchall()
-        rows = conn.execute('SELECT * FROM paper_accounts').fetchall()
-        assert rows == [(*before[0], None, None)]
+        row = dict(zip([c[1] for c in columns], conn.execute('SELECT * FROM paper_accounts').fetchone(), strict=True))
+        # The bid/ask cutover initializes once; all preexisting policy fields survive.
+        assert row['fill_model_cutover'] is not None
+        assert {key: row[key] for key in before if key != 'fill_model_cutover'} == {
+            key: value for key, value in before.items() if key != 'fill_model_cutover'}
+        assert row['stage_trigger_pct'] is None and row['stage_trail_pct'] is None
         assert [c[1] for c in columns][-2:] == ['stage_trigger_pct', 'stage_trail_pct']
         assert all(c[3] == 0 and c[4] is None for c in columns[-2:])
     aid = db.create_paper_account('staged', kind='options', stop_type='trailing_staged', stop_value=20,

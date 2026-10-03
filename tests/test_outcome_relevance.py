@@ -110,6 +110,7 @@ class TestSweepRelevantTickers:
             "expiration_date": "2026-08-01",
             "contracts": 1,
             "entry_premium": 5.0,
+            "entry_bid": 5.0, "entry_ask": 5.0,
         })
         result = scheduler._sweep_relevant_tickers()
         assert result is not None

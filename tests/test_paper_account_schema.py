@@ -243,6 +243,7 @@ def test_arm_options_stop_limit(tmp_db):
             "expiration_date": "2024-01-05",
             "contracts": 1,
             "entry_premium": 2.50,
+            "entry_bid": 2.50, "entry_ask": 2.50,
         },
     )
 

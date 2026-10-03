@@ -31,7 +31,7 @@ from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import account_policy, db, options_data
+from . import account_policy, db, options_data, options_fills
 from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ def _display(pos_or_cand: dict[str, Any]) -> str:
     """'AAPL 230C 2026-08-21' style label."""
     return "{u} {s:g}{cp} {e}".format(
         u=pos_or_cand.get("underlying") or pos_or_cand.get("ticker") or "?",
-        s=float(pos_or_cand.get("strike") or 0),
+        s=options_fills.price(pos_or_cand.get("strike")) or 0,
         cp=(pos_or_cand.get("put_call") or "?")[0],
         e=pos_or_cand.get("expiration_date") or "?",
     )
@@ -135,11 +135,9 @@ def _mark(pos: dict[str, Any]) -> float:
     to entry_premium, which made mark == entry, so the -60% stop-loss test
     could never fire on a -100% position and P&L reported 0% instead.
     """
-    for key in ("current_premium", "entry_premium"):
-        v = pos.get(key)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
-            return float(v)
-    return 0.0
+    bid, _reason = options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))
+    return bid if bid is not None else 0.0
+
 
 
 def effective_stop_level(
@@ -153,22 +151,23 @@ def effective_stop_level(
     The ONE place an options stop level is computed. Callers: forced_closes
     (the daily allocator backstop — no interval notion, so prev_mark is None)
     and options_engine._apply_intraday_stops (the hourly refresh, which passes
-    the pre-refresh mark so a level crossed this interval fills AT the level).
+    the pre-refresh bid). Every fill executes at the observed bid.
     Staged evaluations save the ratchet under a short DB writer transaction;
     other stop types remain pure. `armed` comes from stop_triggered_at (stop-limit
     resting fill).
     """
     if policy.stop_type == "trailing_staged" and pos.get("id") is not None:
-        return db.evaluate_staged_options_stop(pos, policy, prev_mark)
-    return account_policy.evaluate(
+        return options_fills.bid_stop(db.evaluate_staged_options_stop(pos, policy, prev_mark), _mark(pos))
+    return options_fills.bid_stop(account_policy.evaluate(
         policy,
-        entry=float(pos.get("entry_premium") or 0),
-        peak=float(pos.get("peak_premium") or 0),
+        entry=options_fills.stop_entry(pos),
+        peak=options_fills.price(pos.get("peak_premium")) or 0,
         mark=_mark(pos),
-        prev_mark=prev_mark,
+        prev_mark=options_fills.price(prev_mark),
         armed=bool(pos.get("stop_triggered_at")),
-        stop_level_hwm=pos.get("stop_level_hwm"),
-    )
+        stop_level_hwm=options_fills.price(pos.get("stop_level_hwm")),
+        allow_zero_entry=True,
+    ), _mark(pos))
 
 
 def forced_closes(
@@ -178,6 +177,9 @@ def forced_closes(
     """(position, exit_reason, exit_premium) triples the risk rules close regardless of the LLM."""
     out: list[tuple[dict[str, Any], str, float]] = []
     for pos in open_positions:
+        bid, _reason = options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))
+        if bid is None:
+            continue
         # DTE floor is unconditional — never gated by stop_type.
         if _dte(pos.get("expiration_date") or "") <= DTE_FLOOR:
             out.append((pos, "dte_floor", _mark(pos)))
@@ -224,13 +226,13 @@ def _fallback(
     per_target = min(per_cap, deployable / slots) if slots else 0.0
     spent = 0.0
     for c in ranked:
-        mid = float(c.get("mid") or 0)
-        if mid <= 0:
+        ask, _reason = options_fills.buy_quote(c.get("bid"), c.get("ask"))
+        if ask is None:
             continue
-        contracts = int(per_target // (mid * 100))
+        contracts = int(per_target // (ask * 100))
         if contracts < 1:
             continue
-        cost = contracts * mid * 100
+        cost = contracts * ask * 100
         if spent + cost > deployable:
             continue
         spent += cost
@@ -268,6 +270,19 @@ def run(
     and opens carry the full candidate contract + contracts count.
     """
     fresh_signals = fresh_signals or {}
+    exclusions = []
+    valid_candidates = []
+    for candidate in candidates:
+        _ask, reason = options_fills.buy_quote(candidate.get("bid"), candidate.get("ask"))
+        if reason:
+            exclusions.append({"occ_symbol": candidate.get("occ_symbol"), "reason": reason})
+        else:
+            valid_candidates.append(candidate)
+    candidates = valid_candidates
+    for position in open_positions:
+        bid, reason = options_fills.sell_quote(position.get("current_bid"), position.get("entry_bid"))
+        if bid is None:
+            exclusions.append({"occ_symbol": position.get("occ_symbol"), "reason": reason})
     # Mirror _BIAS_CONTEXT's newline convention so an empty block changes
     # nothing and a real one gets clean line separation.
     if lessons_context and not lessons_context.startswith("\n"):
@@ -329,7 +344,7 @@ def run(
         excerpt = (c.get("final_decision") or c.get("rationale") or "")[:200]
         user += (
             f"{c['occ_symbol']} | {_display(c)} | {c.get('dte')}d | {delta_txt} | "
-            f"mid ${float(c.get('mid') or 0):.2f} (${float(c.get('mid') or 0) * 100:,.0f}/contract) | "
+            f"ask ${float(c.get('ask') or 0):.2f} (${float(c.get('ask') or 0) * 100:,.0f}/contract) | "
             f"OI {c.get('open_interest')} | {c.get('signal')} conviction {c.get('conviction')}/10 | {excerpt}\n"
         )
 
@@ -339,7 +354,7 @@ def run(
         per_cap=per_cap, per_pct=per_pct * 100,
         total_cap=total_cap, total_pct=total_pct * 100,
         max_positions=MAX_OPEN_POSITIONS,
-        stop_policy_text=account_policy.describe_policy(policy),
+        stop_policy_text=account_policy.describe_policy(policy) + " Entries execute at ask; sells and marks at bid. Fixed stops reference entry bid; trailing peaks begin at entry bid.",
     )
 
     # ── LLM call (deterministic fallback on any failure) ─────────────────────
@@ -394,6 +409,11 @@ def run(
 
     for d in llm_closes:
         p = open_by_occ[d["occ_symbol"]]
+        bid, reason = options_fills.sell_quote(p.get("current_bid"), p.get("entry_bid"))
+        if bid is None:
+            holds.append({"position_id": p["id"], "occ_symbol": p["occ_symbol"], "rationale": "Missing bid: close excluded."})
+            exclusions.append({"occ_symbol": p["occ_symbol"], "reason": reason})
+            continue
         closes.append({
             "position_id": p["id"], "occ_symbol": p["occ_symbol"],
             "ticker": p.get("underlying"), "exit_reason": "llm_close",
@@ -416,11 +436,15 @@ def run(
             clamped_notes.append(f"{d['occ_symbol']}: dropped (max {MAX_OPEN_POSITIONS} positions)")
             continue
         c = cand_by_occ[d["occ_symbol"]]
-        mid = float(c.get("mid") or 0)
-        if mid <= 0:
+        ask, _reason = options_fills.buy_quote(c.get("bid"), c.get("ask"))
+        if ask is None:
             continue
-        per_contract = mid * 100
-        want = max(1, int(d.get("contracts") or 1))
+        per_contract = ask * 100
+        try:
+            want = max(1, int(d.get("contracts") or 1))
+        except (TypeError, ValueError, OverflowError):
+            exclusions.append({"occ_symbol": c.get("occ_symbol"), "reason": "invalid_contract_count"})
+            continue
         cap_contracts = int(min(per_cap, deployable) // per_contract)
         contracts = min(want, cap_contracts)
         if contracts < 1:
@@ -449,16 +473,16 @@ def run(
     # dashboard's decisions table instead of raw OCC symbols.
     _disp = {p["occ_symbol"]: _display(p) for p in open_positions}
     if closes:
-        lines += ["## Closes", "| Contract | Reason | Exit mid | Rationale |", "|---|---|---|---|"]
+        lines += ["## Closes", "| Contract | Reason | Exit bid | Rationale |", "|---|---|---|---|"]
         for cdec in closes:
             lines.append(f"| {_disp.get(cdec['occ_symbol'], cdec['occ_symbol'])} | {cdec['exit_reason']} "
                          f"| ${cdec.get('exit_premium') or 0:.2f} | {(cdec.get('rationale') or '')[:80]} |")
         lines.append("")
     if opens:
-        lines += ["## New positions", "| Contract | Contracts | Mid | Cost | Conviction | Rationale |", "|---|---|---|---|---|---|"]
+        lines += ["## New positions", "| Contract | Contracts | Ask | Cost | Conviction | Rationale |", "|---|---|---|---|---|---|"]
         for o in opens:
             c = o["contract"]
-            lines.append(f"| {_display(c)} | {o['contracts']} | ${float(c.get('mid') or 0):.2f} "
+            lines.append(f"| {_display(c)} | {o['contracts']} | ${float(c.get('ask') or 0):.2f} "
                          f"| ${o['cost']:,.0f} | {c.get('conviction')}/10 | {(o.get('rationale') or '')[:80]} |")
         lines.append("")
     if holds:
@@ -467,4 +491,4 @@ def run(
         lines += ["## Cap clamps", *[f"- {n}" for n in clamped_notes], ""]
 
     return {"closes": closes, "holds": holds, "opens": opens,
-            "report_md": "\n".join(lines)}
+            "report_md": "\n".join(lines), "exclusions": exclusions}

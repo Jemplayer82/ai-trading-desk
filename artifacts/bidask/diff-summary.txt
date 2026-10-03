@@ -1,0 +1,17 @@
+ scripts/rescore_options_bidask.py    | 190 ++++++++++++++++++++++++++++++++++
+ scripts/smoke_options_bidask.py      | 162 +++++++++++++++++++++++++++++
+ tests/test_options_allocator.py      |  21 ++--
+ tests/test_options_bidask.py         | 156 ++++++++++++++++++++++++++++
+ tests/test_options_bidask_ui.py      |  71 +++++++++++++
+ tests/test_options_lifecycle.py      | 160 +++++++++++++++--------------
+ tests/test_outcome_relevance.py      |   1 +
+ tests/test_paper_account_schema.py   |   1 +
+ tests/test_rescore_options_bidask.py |  89 ++++++++++++++++
+ tests/test_staged_stop.py            |  11 +-
+ web/account_policy.py                |   3 +-
+ web/db.py                            | 193 +++++++++++++++++++++--------------
+ web/options_allocator.py             |  82 +++++++++------
+ web/options_engine.py                | 182 +++++++++++++--------------------
+ web/options_fills.py                 |  41 ++++++++
+ web/static/options.js                |  36 +++++--
+ 16 files changed, 1088 insertions(+), 311 deletions(-)

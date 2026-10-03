@@ -1,0 +1,95 @@
+........................................................................ [  3%]
+........................................................................ [  7%]
+........................................................................ [ 11%]
+........................................................................ [ 15%]
+........................................................................ [ 19%]
+........................................................................ [ 23%]
+......................s................................................. [ 27%]
+..................................................................... [ 31%]
+........................................................................ [ 35%]
+....................................................................................................................................... [ 42%]
+........................................................................ [ 46%]
+........................................................................ [ 50%]
+........................................................................ [ 54%]
+........................................................................ [ 58%]
+........................................................................ [ 62%]
+........................................................................ [ 66%]
+........................................................................ [ 70%]
+........................................................................ [ 74%]
+........................................................................ [ 78%]
+........................................................................ [ 82%]
+........................................................................ [ 86%]
+........................................................................ [ 90%]
+........................................................................ [ 94%]
+........................................................................ [ 98%]
+................................                                         [100%]
+=============================== warnings summary ===============================
+tests/test_anthropic_effort.py::TestEffortGate::test_haiku_does_not_receive_effort[claude-haiku-4-5-20251001]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-haiku-4-5-20251001' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_haiku_does_not_receive_effort[claude-haiku-5-0]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-haiku-5-0' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_sonnet_4_5_does_not_receive_effort[claude-sonnet-4-5]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-sonnet-4-5' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_sonnet_4_5_does_not_receive_effort[claude-sonnet-4-5-20250929]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-sonnet-4-5-20250929' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_current_opus_and_sonnet_receive_effort[claude-opus-4-6]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-opus-4-6' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_current_opus_and_sonnet_receive_effort[claude-opus-4-5]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-opus-4-5' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_single_segment_five_series_ids_receive_effort[claude-fable-5]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-fable-5' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_single_segment_five_series_ids_receive_effort[claude-mythos-5]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-mythos-5' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_future_releases_inherit_effort_via_pattern[claude-opus-6]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-opus-6' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_future_releases_inherit_effort_via_pattern[claude-opus-5-1]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-opus-5-1' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_future_releases_inherit_effort_via_pattern[claude-sonnet-6]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-sonnet-6' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_future_releases_inherit_effort_via_pattern[claude-fable-6]
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-fable-6' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_mythos_preview_receives_effort
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-mythos-preview' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_anthropic_effort.py::TestEffortGate::test_unknown_anthropic_model_does_not_receive_effort
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/anthropic_client.py:63: RuntimeWarning: Model 'claude-experimental-x' is not in the known model list for provider 'anthropic'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+tests/test_news_analyst_wiring.py: 3 warnings
+tests/test_orchestrator_analyst_specs.py: 3 warnings
+tests/test_orchestrator_node_labeling.py: 5 warnings
+tests/test_orchestrator_parallel_analysts.py: 20 warnings
+tests/test_rerun_decision.py: 24 warnings
+tests/test_switchboard_orchestrator.py: 2 warnings
+  /home/landon/.codex/worktrees/desk-bidask-fills-20261003/tradingagents/llm_clients/openai_client.py:198: RuntimeWarning: Model 'gpt-4o-mini' is not in the known model list for provider 'openai'. Continuing anyway.
+    self.warn_if_unknown_model()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_deepseek_reasoning.py:209: DEEPSEEK_API_KEY not set (or placeholder); skipping live API call
+1819 passed, 1 skipped, 71 warnings, 84 subtests passed in 73.17s (0:01:13)

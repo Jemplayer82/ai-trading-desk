@@ -1,0 +1,28 @@
+{
+  "source_sha256": "d423ec50dd0c7602de95cf01e2207094805c403dff5a52b2fd57bfa2eef69a57",
+  "counts": {
+    "rows_processed": 96,
+    "allocator_sizing_paths": 96,
+    "entry_paths": 576,
+    "mark_paths": 576,
+    "stop_paths": 3456,
+    "stale_mark_paths": 1152,
+    "zero_bid_stop_paths": 3456,
+    "exit_paths": 576,
+    "refresh_paths": 1,
+    "expiry_scheduler_rows": 96,
+    "equity_paths": 1
+  },
+  "exclusions": {
+    "stale_bid_scenarios": 576
+  },
+  "exceptions": {},
+  "exception_count": 0,
+  "outcome_values_suppressed": true,
+  "limitations": [
+    "Export-seeded disposable SQLite; never live DB.",
+    "Entry bid/ask are real evidence; no historical exit quotes stored.",
+    "Missing and zero quotes are supplemental edge scenarios.",
+    "All stop policies and close reasons execute numeric persistence; no LLM/provider calls."
+  ]
+}
