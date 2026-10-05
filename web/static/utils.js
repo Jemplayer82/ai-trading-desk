@@ -79,7 +79,16 @@ function fmtTs(iso) {
  */
 async function apiFetch(url, options) {
   const resp = await fetch(url, options);
-  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  if (!resp.ok) {
+    // Surface the server's reason (FastAPI puts it in `detail`) so a popup says
+    // "An options account named 'Bull' already exists" rather than "HTTP 409".
+    let detail = "";
+    try {
+      const body = await resp.json();
+      if (body && typeof body.detail === "string") detail = body.detail;
+    } catch (e) { /* non-JSON error body */ }
+    throw new Error(detail ? detail + " (HTTP " + resp.status + ")" : "HTTP " + resp.status);
+  }
   return resp.json();
 }
 

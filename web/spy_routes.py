@@ -118,7 +118,11 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception as exc:
         if "UNIQUE" in str(exc):
-            raise HTTPException(status_code=409, detail=f"Account '{name}' already exists") from exc
+            tab = "options" if kind == "options" else "S&P"
+            raise HTTPException(
+                status_code=409,
+                detail=f"An {tab} account named '{name}' already exists — pick another name",
+            ) from exc
         raise
     account = db.get_paper_account(account_id)
     return {"account": account}
@@ -173,7 +177,11 @@ def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any
         db.update_paper_account(account_id=account_id, **fields)
     except Exception as exc:
         if "UNIQUE" in str(exc):
-            raise HTTPException(status_code=409, detail=f"Account '{fields.get('name')}' already exists") from exc
+            tab = "options" if (db.get_paper_account(account_id) or {}).get("kind") == "options" else "S&P"
+            raise HTTPException(
+                status_code=409,
+                detail=f"An {tab} account named '{fields.get('name')}' already exists — pick another name",
+            ) from exc
         raise
     return {"account": db.get_paper_account(account_id)}
 

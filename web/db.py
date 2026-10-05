@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -244,7 +245,7 @@ CREATE TABLE IF NOT EXISTS ticker_info (
 -- (see web/account_policy.py).
 CREATE TABLE IF NOT EXISTS paper_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     starting_capital REAL NOT NULL DEFAULT 100000,
     aggressiveness INTEGER NOT NULL DEFAULT 5,
     bias TEXT NOT NULL DEFAULT 'neutral',
@@ -255,7 +256,10 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     stop_value REAL,
     stop_limit_offset REAL,
     stage_trigger_pct REAL,
-    stage_trail_pct REAL
+    stage_trail_pct REAL,
+    -- Names are unique per tab (kind): an options account may share a name
+    -- with an S&P account. See _migrate_paper_account_names_per_kind.
+    UNIQUE (kind, name)
 );
 
 -- One row per paper option contract position over its whole life. Unlike the
@@ -449,6 +453,7 @@ def init_db() -> None:
             # key is a tuple of one or more (table, column) pairs; all must have been added.
             if all((table, column) in applied for (table, column) in key):
                 conn.execute(sql)
+        _migrate_paper_account_names_per_kind(conn)
         _encrypt_existing_secrets(conn)
     # The DB holds API keys, OAuth secrets and password hashes — keep it readable
     # only by the owning service account, not world/group (umask can leave it 644).
@@ -456,6 +461,60 @@ def init_db() -> None:
         DB_PATH.chmod(0o600)
     except OSError:
         pass
+
+
+_LEGACY_NAME_UNIQUE = re.compile(r"\bname\s+TEXT\s+NOT\s+NULL\s+UNIQUE\b", re.IGNORECASE)
+
+
+def _migrate_paper_account_names_per_kind(conn: sqlite3.Connection) -> bool:
+    """Rebuild paper_accounts so names are unique per kind, not globally.
+
+    Databases created before 2026-10-05 declare ``name TEXT NOT NULL UNIQUE``,
+    which made an options account named "Bull" impossible while an S&P account
+    "Bull" existed. SQLite cannot drop an inline UNIQUE, so the table is
+    rebuilt with ``UNIQUE (kind, name)``, copying every column that exists.
+
+    The AUTOINCREMENT counter is carried over explicitly: deleted accounts'
+    positions, cash ledger and scans keep their old paper_account_id, so a new
+    account must never be handed an id that was used before. No table has a
+    FOREIGN KEY to paper_accounts, so the drop/rename is safe with
+    foreign_keys=ON. Idempotent: returns False when already migrated.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'paper_accounts'"
+    ).fetchone()
+    if not row or not _LEGACY_NAME_UNIQUE.search(row["sql"] or ""):
+        return False
+    old_sql = row["sql"]
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(paper_accounts)")]
+    seq_row = conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'paper_accounts'"
+    ).fetchone()
+    old_seq = int(seq_row["seq"]) if seq_row else 0
+
+    new_sql = _LEGACY_NAME_UNIQUE.sub("name TEXT NOT NULL", old_sql, count=1)
+    close = new_sql.rstrip().rfind(")")
+    new_sql = new_sql[:close].rstrip() + ",\n    UNIQUE (kind, name)\n)"
+    new_sql = re.sub(r"(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)[\"`]?paper_accounts[\"`]?",
+                     r"\1paper_accounts__per_kind", new_sql, count=1, flags=re.IGNORECASE)
+    col_list = ", ".join(cols)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(new_sql)
+        conn.execute(
+            f"INSERT INTO paper_accounts__per_kind ({col_list}) SELECT {col_list} FROM paper_accounts"
+        )
+        max_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM paper_accounts").fetchone()["m"]
+        conn.execute("DROP TABLE paper_accounts")
+        conn.execute("ALTER TABLE paper_accounts__per_kind RENAME TO paper_accounts")
+        keep = max(old_seq, int(max_id))
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'paper_accounts'")
+        conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('paper_accounts', ?)", (keep,))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return True
 
 
 def _encrypt_existing_secrets(conn: sqlite3.Connection) -> None:
