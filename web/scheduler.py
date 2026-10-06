@@ -501,6 +501,33 @@ def job_options_settle() -> None:
         log.exception("[options_settle] failed: %s", exc)
 
 
+def _post_rules(path: str, tag: str) -> None:
+    """Rules-only options account (web/rules_engine.py): no LLM. Skips NYSE holidays;
+    409 = no rules account exists yet (informational)."""
+    if not market_calendar.is_trading_day(market_calendar.today_et()):
+        log.info("[%s] not a trading day - skipped", tag)
+        return
+    try:
+        r = httpx.post(f"{PORTFOLIO_URL}{path}", timeout=60, headers=_internal_headers())
+        log.info("[%s] response %s: %s", tag, r.status_code, r.text[:200])
+        if r.status_code >= 400 and r.status_code != 409:
+            alerts.notify(f"⚠️ Rules account {tag} rejected ({r.status_code}).",
+                          r.text[:_ALERT_DETAIL_MAX], link=DASHBOARD_URL)
+    except Exception as exc:
+        log.exception("[%s] failed: %s", tag, exc)
+        alerts.notify(f"⚠️ Rules account {tag} failed to start.", str(exc), link=DASHBOARD_URL)
+
+
+def job_rules_run() -> None:
+    """15:45 ET: exits, entries and idle money for the rules-only options account."""
+    _post_rules("/api/options-rules/run", "rules_run")
+
+
+def job_rules_prepare() -> None:
+    """18:00 ET: earnings + Congress data, next session's signals for the rules-only account."""
+    _post_rules("/api/options-rules/prepare", "rules_prepare")
+
+
 def job_options_grade() -> None:
     """Nightly options-ledger grading: backfill exit spots + batch-reflect.
 
@@ -1080,6 +1107,20 @@ def register_jobs(sched: BlockingScheduler) -> None:
             id="options_grade",
             replace_existing=True,
         )
+        sched.add_job(
+            job_rules_run,
+            # Rules-only account: daily exit/entry check near the close (live bid/ask).
+            CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=TIMEZONE),
+            id="rules_run",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_rules_prepare,
+            # After the close: today's closes are final; the Congress pull is rate-limited (~1.5 h).
+            CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=TIMEZONE),
+            id="rules_prepare",
+            replace_existing=True,
+        )
 
 
 def main() -> None:
@@ -1167,6 +1208,8 @@ def main() -> None:
         log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
         log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
         log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
+        log.info(" - rules_run          cron 15:45 Mon-Fri %s (rules-only account, no LLM)", TIMEZONE)
+        log.info(" - rules_prepare      cron 18:00 Mon-Fri %s (rules-only account signals)", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
