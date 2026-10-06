@@ -44,6 +44,7 @@
   <!-- TIER:3 END -->
   <!-- TIER:4 BEGIN -->
   <script src="/static/options.js" defer></script>
+  <script src="/static/rules.js" defer></script>
   <!-- TIER:4 END -->
   <script src="/static/credentials.js" defer></script>
 </head>
@@ -106,6 +107,7 @@
       <!-- TIER:3 END -->
       <!-- TIER:4 BEGIN -->
       <button class="main-tab" data-tab="options">Options</button>
+      <button class="main-tab" data-tab="rules">Rules</button>
       <!-- TIER:4 END -->
       <button class="main-tab" data-tab="keys">Settings</button>
     </nav>
@@ -494,6 +496,23 @@
       </div>
 
       <div id="options-main"></div>
+    </section>
+  </main>
+
+  <!-- ===== TAB: Rules-only options account (rules.js) — no AI anywhere ===== -->
+  <main class="tab-pane" data-pane="rules" hidden>
+    <section class="main">
+      <div class="panel">
+        <div class="panel-title">[ Rules Account — no AI ]</div>
+        <p class="dim" style="margin:0 0 10px;">Buys calls on two signals the strategy lab found worked: an earnings beat where the stock rose the next day, and a member of Congress filing a stock purchase. Every step is a fixed rule — no AI picks, sizes or sells anything. Contract: about 60 days out, delta about 0.50, bid/ask gap 3% or less, no earnings before the exit. Size: 2% of the account per trade, at most 4 open per signal. Exit: once up 50%, sell on a 10% drop from its best; otherwise sell 7 days before expiry. Buys at the ask and sells at the bid, $0.65 a contract. Idle money sits in SPY while SPY is above its 200-day average, in cash otherwise. Signals are found after the close (6:00 PM ET); trades happen the next day at 3:45 PM ET. 100% simulated.</p>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <input type="text" id="rules-new-name" placeholder="Account name" value="Rules: earnings + Congress" style="width:240px;">
+          <input type="number" id="rules-new-capital" value="50000" min="1000" step="1000" style="width:120px;">
+          <button id="btn-rules-create" type="button" class="ghost">Create account</button>
+          <button id="btn-rules-reload" type="button" class="ghost">Reload</button>
+        </div>
+      </div>
+      <div id="rules-main"></div>
     </section>
   </main>
   <!-- TIER:4 END -->

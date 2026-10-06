@@ -66,6 +66,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "web/rules_engine.py",
         "web/rules_routes.py",
         "web/static/options.js",
+        "web/static/rules.js",
         "scripts/rescore_options_bidask.py",
         "scripts/smoke_options_bidask.py",
         "tests/test_options_bidask.py",
