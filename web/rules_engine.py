@@ -462,9 +462,13 @@ def prepare(feeds: Feeds | None = None, today: date | None = None,
         return {"skipped": "no rules accounts"}
     if not _PREPARE_LOCK.acquire(blocking=False):
         return {"skipped": "prepare already running"}
-    with db.connect() as conn:
-        run_id = conn.execute("INSERT INTO rules_runs (kind, started_at, status) VALUES ('prepare', ?, 'running')",
-                              (_now(),)).lastrowid
+    try:
+        with db.connect() as conn:
+            run_id = conn.execute("INSERT INTO rules_runs (kind, started_at, status) VALUES ('prepare', ?, 'running')",
+                                  (_now(),)).lastrowid
+    except Exception:
+        _PREPARE_LOCK.release()
+        raise
     out: dict[str, Any] = {"pead": 0, "congress": 0, "late": 0, "errors": []}
     try:
         universe = sorted({t for t in feeds.sp500() if _ok_ticker(t)})
@@ -594,12 +598,13 @@ def run_daily(feeds: Feeds | None = None, today: date | None = None, force: bool
         return {"skipped": "not a trading day"}
     if not _RUN_LOCK.acquire(blocking=False):
         return {"skipped": "run already in progress"}
-    with db.connect() as conn:
-        run_id = conn.execute("INSERT INTO rules_runs (kind, started_at, status) VALUES ('run', ?, 'running')",
-                              (_now(),)).lastrowid
+    run_id: int | None = None
     out: dict[str, Any] = {}
     status = "failed"
     try:
+        with db.connect() as conn:
+            run_id = conn.execute("INSERT INTO rules_runs (kind, started_at, status) VALUES ('run', ?, 'running')",
+                                  (_now(),)).lastrowid
         out = _run_all(feeds, today)
         status = "done" if not any("error" in r for r in out["accounts"].values()) else "failed"
         return out
@@ -608,13 +613,16 @@ def run_daily(feeds: Feeds | None = None, today: date | None = None, force: bool
         out = {"error": str(exc)}
         raise
     finally:
-        with db.connect() as conn:
-            conn.execute("UPDATE rules_runs SET finished_at = ?, status = ?, summary = ? WHERE id = ?",
-                         (_now(), status, json.dumps(out, default=str)[:4000], run_id))
-        if status != "done":
-            _alert(f"⚠️ Rules account daily run failed ({today.isoformat()}); today's signals may be missed.",
-                   json.dumps(out, default=str)[:1500])
         _RUN_LOCK.release()
+        try:
+            if run_id is not None:
+                with db.connect() as conn:
+                    conn.execute("UPDATE rules_runs SET finished_at = ?, status = ?, summary = ? WHERE id = ?",
+                                 (_now(), status, json.dumps(out, default=str)[:4000], run_id))
+        finally:
+            if status != "done":
+                _alert(f"⚠️ Rules account daily run failed ({today.isoformat()}); today's signals may be missed.",
+                       json.dumps(out, default=str)[:1500])
 
 
 def _alert(summary: str, detail: str) -> None:
