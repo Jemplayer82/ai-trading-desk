@@ -102,10 +102,13 @@ async function loadRulesTab() {
   let h = accounts.length ? accounts.map(rulesAccountHtml).join("") :
     "<div class=\"panel\"><p class=\"dim\">No rules account yet. Create one above.</p></div>";
   const runs = data.runs || [];
-  if (runs.length) {
-    const r = runs[0];
-    h += "<p class=\"dim\" style=\"font-size:11px;\">Last signal check: " + escapeHtml(r.status) + ", started " +
-      escapeHtml(r.started_at || "") + "</p>";
+  for (const [kind, label] of [["prepare", "Last signal check"], ["run", "Last trading run"]]) {
+    const r = runs.find((x) => x.kind === kind);
+    if (r) {
+      const color = r.status === "failed" ? "var(--accent-red)" : "var(--dim)";
+      h += "<p style=\"font-size:11px;color:" + color + ";\">" + label + ": " + escapeHtml(r.status) + ", started " +
+        escapeHtml(r.started_at || "") + " UTC</p>";
+    }
   }
   box.innerHTML = h;
 }

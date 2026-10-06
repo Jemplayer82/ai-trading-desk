@@ -279,3 +279,32 @@ def test_signal_whose_entry_day_passed_is_late(tmp_db):
     re_.prepare(feeds, date(2026, 10, 7))            # filed 10/01 -> entry 10/05, already gone
     (row,) = _rows("SELECT status, reason FROM rules_signals")
     assert row["status"] == "late"
+
+
+def test_empty_quote_never_sells_an_armed_trade_at_zero(tmp_db):
+    today = date(2026, 10, 6)
+    aid = re_.create_account("Rules", 50_000)
+    f = FakeFeeds(today)
+    occ = "XYZ   261205C00100000"
+    f.chains["XYZ"] = [dict(_cand(100, 60, 4.0, 4.1, 0.5), occ_symbol=occ, underlying="XYZ")]
+    _signal(aid, "pead", "XYZ", today)
+    re_.run_daily(f.as_feeds(), today)
+    f.q[occ] = {"bid": 7.0, "ask": 7.1}
+    re_.run_daily(f.as_feeds(), today + timedelta(days=1))          # arms
+    f.q[occ] = {"bid": 0, "ask": 0}
+    re_.run_daily(f.as_feeds(), today + timedelta(days=2))          # empty quote: no sale
+    p = _rows("SELECT * FROM rules_positions")[0]
+    assert p["status"] == "open" and p["armed"] == 1 and p["last_value"] == pytest.approx(699.35)
+
+
+def test_failed_run_is_logged_and_alerted(tmp_db, monkeypatch):
+    re_.create_account("Rules", 50_000)
+    sent = []
+    monkeypatch.setattr(re_, "_alert", lambda summary, detail: sent.append(summary))
+    feeds = re_.Feeds(sp500=lambda: [], av=lambda *a, **k: None, daily_closes=lambda s: {},
+                      call_chain=lambda *a: [], quotes=lambda s: {})
+    with pytest.raises(RuntimeError):
+        re_.run_daily(feeds, date(2026, 10, 6))
+    (run,) = _rows("SELECT kind, status, summary FROM rules_runs")
+    assert (run["kind"], run["status"]) == ("run", "failed") and "200-day" in run["summary"]
+    assert sent and "daily run failed" in sent[0]

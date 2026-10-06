@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from . import db, market_calendar
+from . import db, market_calendar, options_fills
 
 log = logging.getLogger(__name__)
 
@@ -470,7 +470,12 @@ def prepare(feeds: Feeds | None = None, today: date | None = None,
         universe = sorted({t for t in feeds.sp500() if _ok_ticker(t)})
         uni = set(universe)
         # 1. earnings calendar (one call): who reports, and the forward dates for the exit filter
-        cal = feeds.av("EARNINGS_CALENDAR", horizon="3month")
+        try:
+            cal = feeds.av("EARNINGS_CALENDAR", horizon="3month")
+        except Exception as exc:  # keep going: Congress signals don't need the calendar
+            log.exception("[rules] earnings calendar failed")
+            out["errors"].append(f"earnings calendar: {exc}")
+            cal = None
         rows = list(csv.DictReader(io.StringIO(cal))) if isinstance(cal, str) else []
         with db.connect() as conn:
             if rows:  # forward dates move: replace every future date with today's list
@@ -546,6 +551,7 @@ def prepare(feeds: Feeds | None = None, today: date | None = None,
                                 continue
                             signal, entry = congress_days(filed)
                             if sessions_between(entry, today) > CONGRESS_LATE_SESSIONS:
+                                out["congress_old"] = out.get("congress_old", 0) + 1
                                 continue  # an old filing surfacing now: not a tradeable signal
                             new_days.setdefault(signal, set()).add(str(tr.get("bioguide_id") or ""))
                         for signal, members in new_days.items():
@@ -568,6 +574,9 @@ def prepare(feeds: Feeds | None = None, today: date | None = None,
     finally:
         _PREPARE_LOCK.release()
     out["errors"] = out["errors"][:50]
+    if status != "done" or len(out["errors"]) > 25:
+        _alert(f"⚠️ Rules account signal check {status} ({today.isoformat()}), {len(out['errors'])} errors.",
+               json.dumps(out, default=str)[:1500])
     with db.connect() as conn:
         conn.execute("UPDATE rules_runs SET finished_at = ?, status = ?, summary = ? WHERE id = ?",
                      (_now(), status, json.dumps(out), run_id))
@@ -585,21 +594,54 @@ def run_daily(feeds: Feeds | None = None, today: date | None = None, force: bool
         return {"skipped": "not a trading day"}
     if not _RUN_LOCK.acquire(blocking=False):
         return {"skipped": "run already in progress"}
+    with db.connect() as conn:
+        run_id = conn.execute("INSERT INTO rules_runs (kind, started_at, status) VALUES ('run', ?, 'running')",
+                              (_now(),)).lastrowid
+    out: dict[str, Any] = {}
+    status = "failed"
     try:
-        spy_closes = feeds.daily_closes("SPY")
-        on = switch_on(spy_closes, today)
-        if on is None:
-            raise RuntimeError("not enough SPY history for the 200-day average")
-        spy_q = feeds.quotes(["SPY"]).get("SPY") or {}
-        spy_px = _num(spy_q.get("last")) or _num(spy_q.get("bid"))
-        if not spy_px:
-            raise RuntimeError("no SPY price")
-        results = {}
-        for acct in list_accounts(active_only=True):
-            results[acct["name"]] = _run_account(acct, feeds, today, on, spy_px)
-        return {"date": today.isoformat(), "switch_on": on, "spy": spy_px, "accounts": results}
+        out = _run_all(feeds, today)
+        status = "done" if not any("error" in r for r in out["accounts"].values()) else "failed"
+        return out
+    except Exception as exc:
+        log.exception("[rules] daily run failed")
+        out = {"error": str(exc)}
+        raise
     finally:
+        with db.connect() as conn:
+            conn.execute("UPDATE rules_runs SET finished_at = ?, status = ?, summary = ? WHERE id = ?",
+                         (_now(), status, json.dumps(out, default=str)[:4000], run_id))
+        if status != "done":
+            _alert(f"⚠️ Rules account daily run failed ({today.isoformat()}); today's signals may be missed.",
+                   json.dumps(out, default=str)[:1500])
         _RUN_LOCK.release()
+
+
+def _alert(summary: str, detail: str) -> None:
+    try:
+        from . import alerts
+        alerts.notify(summary, detail)
+    except Exception:
+        log.exception("[rules] alert failed")
+
+
+def _run_all(feeds: Feeds, today: date) -> dict[str, Any]:
+    spy_closes = feeds.daily_closes("SPY")
+    on = switch_on(spy_closes, today)
+    if on is None:
+        raise RuntimeError("not enough SPY history for the 200-day average")
+    spy_q = feeds.quotes(["SPY"]).get("SPY") or {}
+    spy_px = _num(spy_q.get("last")) or _num(spy_q.get("bid"))
+    if not spy_px:
+        raise RuntimeError("no SPY price")
+    results = {}
+    for acct in list_accounts(active_only=True):
+        try:
+            results[acct["name"]] = _run_account(acct, feeds, today, on, spy_px)
+        except Exception as exc:  # one account failing must not block the others
+            log.exception("[rules] account %s failed", acct["name"])
+            results[acct["name"]] = {"error": str(exc)}
+    return {"date": today.isoformat(), "switch_on": on, "spy": spy_px, "accounts": results}
 
 
 def _calendar_dates(ticker: str) -> list[date]:
@@ -626,9 +668,9 @@ def _run_account(acct: dict[str, Any], feeds: Feeds, today: date, on: bool, spy_
     # 1. exits
     for p in positions:
         q = quotes.get(p["occ_symbol"]) or {}
-        bid, ask = _num(q.get("bid")), _num(q.get("ask"))
+        bid, ask = options_fills.quote_bid(q.get("bid"), q.get("ask")), _num(q.get("ask"))
         last_session = session_on_or_before(date.fromisoformat(p["planned_exit"]))
-        quoted = bid is not None and bid >= 0
+        quoted = bid is not None  # 0/0 (empty quote) counts as unquoted, never as a $0 sale
         value = value_per(bid) if quoted else None
         if quoted:
             marks.append((p["id"], iso, bid, ask, _num(q.get("delta")), value, "quote"))
@@ -767,5 +809,5 @@ def summary() -> dict[str, Any]:
                         "closed_trades": len(closed), "wins": sum((p["pnl"] or 0) > 0 for p in closed),
                         "realized_pnl": sum(p["pnl"] or 0 for p in closed), "positions": pos,
                         "signals": sig, "daily": daily})
-        runs = [dict(r) for r in conn.execute("SELECT * FROM rules_runs ORDER BY id DESC LIMIT 5")]
+        runs = [dict(r) for r in conn.execute("SELECT * FROM rules_runs ORDER BY id DESC LIMIT 10")]
     return {"accounts": out, "runs": runs}
