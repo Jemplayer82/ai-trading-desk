@@ -76,7 +76,7 @@ function rulesAccountHtml(a) {
   }
   h += "<div class=\"dim\" style=\"font-size:11px;margin:12px 0 6px;\">Signals (newest first, every one logged, taken or not)</div>";
   if (!a.signals.length) {
-    h += "<p class=\"dim\" style=\"font-size:12px;\">None yet. Signals are found after each close (6:00 PM ET) and traded the next afternoon (3:45 PM ET).</p>";
+    h += "<p class=\"dim\" style=\"font-size:12px;\">None yet. Signals are checked each trading morning (6:30 AM ET) and traded that afternoon (3:45 PM ET).</p>";
   } else {
     h += "<table class=\"spy-table\"><thead><tr><th>Stock</th><th>Signal</th><th>Signal day</th><th>Trade day</th><th>Result</th></tr></thead><tbody>";
     for (const s of a.signals.slice(0, 60)) {

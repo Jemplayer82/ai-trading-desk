@@ -12,7 +12,8 @@ AI path can see or trade this account. Paper only: it reads market data (Schwab 
 chains, Alpha Vantage earnings and Congress filings) and writes rows; there is no order tool.
 
 Rules
-- Signals (computed after the close by prepare(); the trade is the NEXT session):
+- Signals (prepare() runs each trading morning, ~06:30 ET, from completed sessions only; the
+  trade happens that afternoon or later):
   * pead: a quarterly report with surprisePercentage > 0 and close[reaction] > close[prior]
     (prior = last session before the report date, reaction = first session after it). Signal day
     = reaction day; entry = the session after. Rank = -|surprise| (biggest first).
@@ -355,24 +356,24 @@ class _AvClient:
         raise RuntimeError(f"Alpha Vantage kept throttling {function}")
 
 
+def _candle_date(raw: Any) -> date:
+    """Schwab MCP candles carry an ISO string ('2026-10-05T05:00:00.000Z' = that session) or epoch ms."""
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw / 1000, market_calendar._ET).date()
+    return date.fromisoformat(str(raw)[:10])
+
+
 def _schwab_closes(symbol: str) -> dict[date, float]:
-    """Final daily closes. Today's close counts only after 16:15 ET (from the candle, or the
-    quote's regular-session last price when the day's candle is not published yet)."""
+    """Final daily closes of COMPLETED sessions (before today); signals are prepared the next
+    morning, so the latest needed close is always yesterday's."""
     from tradingagents.dataflows import schwab_mcp
     data = schwab_mcp.get_price_history(symbol, period_type="year", period=2) or {}
-    now = market_calendar.now_et()
-    today = now.date()
-    closed = market_calendar.is_trading_day(today) and (now.hour, now.minute) >= (16, 15)
+    today = market_calendar.today_et()
     out: dict[date, float] = {}
     for c in data.get("candles") or []:
-        d = datetime.fromtimestamp(c["datetime"] / 1000, market_calendar._ET).date()
-        if d < today or (d == today and closed):
+        d = _candle_date(c.get("datetime"))
+        if d < today and _num(c.get("close")):
             out[d] = float(c["close"])
-    if closed and today not in out:
-        q = ((schwab_mcp.get_quotes([symbol]) or {}).get(symbol) or {}).get("quote") or {}
-        px = _num(q.get("regularMarketLastPrice"))
-        if px:
-            out[today] = px
     return out
 
 
@@ -439,7 +440,7 @@ def list_accounts(active_only: bool = False) -> list[dict[str, Any]]:
 
 def _insert_signal(conn, account_id: int, system: str, ticker: str, signal: date, entry: date,
                    rank: float, detail: dict[str, Any], today: date) -> None:
-    status = "pending" if entry > today else "late"
+    status = "pending" if entry >= today else "late"
     reason = None if status == "pending" else "data arrived after the entry day"
     conn.execute(
         "INSERT OR IGNORE INTO rules_signals (account_id, system, ticker, signal_date, entry_date, rank, detail, "
@@ -450,8 +451,9 @@ def _insert_signal(conn, account_id: int, system: str, ticker: str, signal: date
 
 def prepare(feeds: Feeds | None = None, today: date | None = None,
             congress: bool = True) -> dict[str, Any]:
-    """After the close: refresh the earnings calendar, find beats with an up move, and new Congress
-    buy filings. Writes pending signals for the next session. Idempotent."""
+    """Each trading morning: refresh the earnings calendar, find beats with an up move, and new
+    Congress buy filings, using completed sessions only. Writes pending signals whose entry day is
+    today or later; anything whose entry day already passed is logged as 'late'. Idempotent."""
     feeds = feeds or default_feeds()
     today = today or market_calendar.today_et()
     init_tables()

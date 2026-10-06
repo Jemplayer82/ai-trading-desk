@@ -524,7 +524,7 @@ def job_rules_run() -> None:
 
 
 def job_rules_prepare() -> None:
-    """18:00 ET: earnings + Congress data, next session's signals for the rules-only account."""
+    """06:30 ET: earnings + Congress data from completed sessions -> signals traded at 15:45 ET."""
     _post_rules("/api/options-rules/prepare", "rules_prepare")
 
 
@@ -1116,8 +1116,9 @@ def register_jobs(sched: BlockingScheduler) -> None:
         )
         sched.add_job(
             job_rules_prepare,
-            # After the close: today's closes are final; the Congress pull is rate-limited (~1.5 h).
-            CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=TIMEZONE),
+            # Morning of the trade day: yesterday's bars are final in Schwab; the rate-limited
+            # Congress pull (~1.5 h) finishes long before the 15:45 ET run.
+            CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TIMEZONE),
             id="rules_prepare",
             replace_existing=True,
         )
@@ -1209,7 +1210,7 @@ def main() -> None:
         log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
         log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
         log.info(" - rules_run          cron 15:45 Mon-Fri %s (rules-only account, no LLM)", TIMEZONE)
-        log.info(" - rules_prepare      cron 18:00 Mon-Fri %s (rules-only account signals)", TIMEZONE)
+        log.info(" - rules_prepare      cron 06:30 Mon-Fri %s (rules-only account signals)", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

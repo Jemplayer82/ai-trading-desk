@@ -223,7 +223,7 @@ def test_time_exit_uses_intrinsic_when_unquoted(tmp_db):
 
 
 def test_prepare_writes_pead_and_congress_signals(tmp_db):
-    today = date(2026, 10, 6)                             # Tuesday
+    today = date(2026, 10, 7)                             # Wednesday morning
     re_.create_account("Rules", 50_000)
     cal = "symbol,name,reportDate,fiscalDateEnding,estimate,currency\nAAA,A,2026-10-05,2026-09-30,1,USD\n" \
           "BBB,B,2026-12-01,2026-09-30,1,USD\nQQQQ,Q,2026-10-05,2026-09-30,1,USD\n"
@@ -247,7 +247,7 @@ def test_prepare_writes_pead_and_congress_signals(tmp_db):
     out = re_.prepare(feeds, today)
     assert out["pead"] == 1 and out["congress"] == 1 and not out["errors"]
     sig = {(r["system"], r["ticker"]): r for r in _rows("SELECT * FROM rules_signals")}
-    # AAA reported 10/05 after the close: reaction 10/06 > prior 10/05 -> entry 10/07
+    # AAA reported 10/05 after the close: reaction 10/06 > prior 10/05 -> entry 10/07 (today, pending)
     assert sig[("pead", "AAA")]["signal_date"] == "2026-10-06" and sig[("pead", "AAA")]["entry_date"] == "2026-10-07"
     assert sig[("pead", "AAA")]["rank"] == pytest.approx(-4.2) and sig[("pead", "AAA")]["status"] == "pending"
     # BBB filed 10/05 -> signal 10/06 -> entry 10/07; the SELL and the 2025 filing make no signal
@@ -263,3 +263,19 @@ def test_prepare_writes_pead_and_congress_signals(tmp_db):
 def test_rules_tables_are_separate_from_ai_accounts(tmp_db):
     re_.create_account("Rules", 50_000)
     assert db.list_paper_accounts() == []                # invisible to every AI allocator path
+
+
+def test_candle_dates_from_schwab_mcp():
+    assert re_._candle_date("2026-10-05T05:00:00.000Z") == date(2026, 10, 5)
+    assert re_._candle_date("2026-12-07T06:00:00.000Z") == date(2026, 12, 7)
+
+
+def test_signal_whose_entry_day_passed_is_late(tmp_db):
+    re_.create_account("Rules", 50_000)
+    congress = {"trades": [{"bioguide_id": "X1", "transaction_type": "BUY", "filed_date": "2026-10-01",
+                            "transaction_date": "2026-09-20"}]}
+    feeds = re_.Feeds(sp500=lambda: ["BBB"], av=lambda f, **p: "" if f == "EARNINGS_CALENDAR" else congress,
+                      daily_closes=lambda t: {}, call_chain=lambda *a: [], quotes=lambda s: {})
+    re_.prepare(feeds, date(2026, 10, 7))            # filed 10/01 -> entry 10/05, already gone
+    (row,) = _rows("SELECT status, reason FROM rules_signals")
+    assert row["status"] == "late"
