@@ -215,10 +215,11 @@ def evaluate(
     prev_mark: float | None = None,
     armed: bool = False,
     stop_level_hwm: float | None = None,
+    allow_zero_entry: bool = False,
 ) -> StopOutcome:
     """The single simulated-stop decision function shared by equity and options."""
     entry_f = float(entry or 0)
-    if policy.stop_type == "none" or entry_f <= 0:
+    if policy.stop_type == "none" or entry_f < 0 or (entry_f == 0 and not allow_zero_entry):
         return StopOutcome("hold", 0.0, None, None, None, False)
 
     value = float(policy.stop_value or 0)

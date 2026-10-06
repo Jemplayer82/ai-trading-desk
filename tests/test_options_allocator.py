@@ -30,7 +30,7 @@ def _pos(pid, occ, dte=30, entry=4.0, mark=4.0, contracts=2, **over):
     base = {
         "id": pid, "occ_symbol": occ, "underlying": occ.split()[0],
         "put_call": "CALL", "strike": 230.0, "expiration_date": _exp(dte),
-        "contracts": contracts, "entry_premium": entry,
+        "contracts": contracts, "entry_premium": entry, "entry_bid": entry, "current_bid": mark,
         "cost_basis": round(entry * 100 * contracts, 2),
         "current_premium": mark, "current_value": round(mark * 100 * contracts, 2),
     }
@@ -164,8 +164,7 @@ def test_llm_decisions_parsed_and_clamped(monkeypatch):
     cand = _cand("AAPL", mid=10.0, conviction=9)
     _mock_llm(monkeypatch, [
         {"occ_symbol": held["occ_symbol"], "action": "CLOSE", "rationale": "thesis done"},
-        # wants 20 contracts @ $1000/contract = $20k; per-position cap at agg 5
-        # is 8% of $100k = $8k -> clamped to 8 contracts.
+        # wants 20 contracts @ $1010 ask/contract; the $8k cap permits 7.
         {"occ_symbol": cand["occ_symbol"], "action": "NEW", "contracts": 20, "rationale": "moon"},
         {"occ_symbol": "HALLU 260821C00001000", "action": "NEW", "contracts": 5},
     ])
@@ -176,8 +175,8 @@ def test_llm_decisions_parsed_and_clamped(monkeypatch):
     # Ignored open position defaults to HOLD.
     assert [h["position_id"] for h in result["holds"]] == [2]
     assert len(result["opens"]) == 1
-    assert result["opens"][0]["contracts"] == 8
-    assert result["opens"][0]["cost"] == pytest.approx(8_000)
+    assert result["opens"][0]["contracts"] == 7
+    assert result["opens"][0]["cost"] == pytest.approx(7_070)
 
 
 def test_allocator_uses_quick_model(monkeypatch):
@@ -191,9 +190,9 @@ def test_allocator_uses_quick_model(monkeypatch):
 
 
 def test_total_premium_cap_across_opens(monkeypatch):
-    # agg 5: total cap 30% of 100k = $30k. Three $10k requests -> ~3 fit but a
-    # $9k held position already at risk leaves $21k -> only 2 full opens fit
-    # (ranked by conviction), the third is clamped down.
+    # agg 5: the $30k total cap less $9k held leaves $21k.
+    # At $10.10 ask, the $8k per-position cap permits 7 contracts ($7070).
+    # The third conviction-ranked request is limited to 6 contracts ($6060).
     held = _pos(1, "MSFT  260821C00420000", dte=30, entry=45.0, mark=45.0, contracts=2)  # cost 9000
     cands = [_cand("AAA", mid=10.0, conviction=9), _cand("BBB", mid=10.0, conviction=8),
              _cand("CCC", mid=10.0, conviction=7)]
@@ -204,9 +203,9 @@ def test_total_premium_cap_across_opens(monkeypatch):
                  equity=100_000, cash=91_000, aggressiveness=5,
                  policy=POLICY_STOP60)
     costs = {o["contract"]["ticker"]: o["cost"] for o in result["opens"]}
-    assert costs["AAA"] == pytest.approx(8_000)   # per-position cap
-    assert costs["BBB"] == pytest.approx(8_000)
-    assert costs.get("CCC", 0) <= 5_000           # leftover budget only
+    assert costs["AAA"] == pytest.approx(7_070)   # per-position cap
+    assert costs["BBB"] == pytest.approx(7_070)
+    assert costs["CCC"] == pytest.approx(6_060)           # leftover budget only
     total_new = sum(o["cost"] for o in result["opens"])
     assert total_new <= 21_000 + 1e-6
 

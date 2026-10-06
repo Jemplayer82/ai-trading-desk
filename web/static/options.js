@@ -31,6 +31,8 @@ let optAccounts = [];
 let activeOptAccountId = null;
 let editingOptAccountId = null;
 
+const optFillPolicyText = "Entries fill at ask; sells and open marks use bid. Fixed stops reference the entry-time bid; trailing and staged stops track a bid peak starting at the entry-time bid.";
+
 // ===== Options paper accounts =====
 
 async function loadOptAccounts() {
@@ -77,7 +79,7 @@ function updateOptAccountMeta() {
   const acct = optAccounts.find((a) => a.id === activeOptAccountId);
   if (!acct) { meta.textContent = ""; return; }
   const biasLabel = { bullish: "🟢 Bullish", neutral: "⬜ Neutral", bearish: "🔴 Bearish" }[acct.bias] || acct.bias;
-  meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel}`;
+  meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel} · ${optFillPolicyText}`;
 }
 
 function renderOptAccountsModal() {
@@ -98,6 +100,7 @@ function renderOptAccountsModal() {
             "$" + (a.starting_capital || 100000).toLocaleString() + " · " +
             "Agg " + a.aggressiveness + "/10 · " + biasLabel + " · " + schedule + " · " + stopSummary(a) +
           "</span>" +
+          "<p class=\"dim\" style=\"font-size:11px;margin:4px 0 0;\">" + optFillPolicyText + "</p>" +
         "</div>" +
         "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +
           "onclick=\"editOptAccount(" + a.id + ")\">Edit</button>" +
@@ -566,7 +569,7 @@ async function renderOptionsView(scanId, preloadedScan) {
   main.innerHTML =
     optBannerHtml(scan) +
     optProgressHtml(scan) +
-    optSummaryHtml(summary) +
+    optSummaryHtml(summary, optAccounts.find((a) => a.id === acctId)) +
     optOpenPositionsHtml(openPositions, summary) +
     optClosedPositionsHtml(settledPositions) +
     optDecisionsHtml(scan) +
@@ -616,7 +619,7 @@ function optProgressHtml(scan) {
   );
 }
 
-function optSummaryHtml(s) {
+function optSummaryHtml(s, account = null) {
   if (!s) return "";
   const retColor = s.return_pct >= 0 ? "var(--accent-green)" : "var(--accent-red)";
   return (
@@ -631,6 +634,11 @@ function optSummaryHtml(s) {
         "<span>Realized P&amp;L: " + optMoneyCell(s.realized_pnl, { signed: true }) + "</span>" +
         "<span class=\"dim\">" + s.open_count + " open · " + s.closed_count + " closed</span>" +
       "</div>" +
+      "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">" + optFillPolicyText + "</p>" +
+      ((account && account.fill_model_cutover) || s.fill_model_cutover
+        ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">fills before " +
+          escapeHtml(String((account && account.fill_model_cutover) || s.fill_model_cutover)) +
+          " were at mid; see re-score</p>" : "") +
     "</div>"
   );
 }
@@ -681,6 +689,18 @@ function optOpenTotalsHtml(positions, summary) {
   return "<tfoot>" + html + "</tfoot>";
 }
 
+// Quote fields are informational; the server's current_premium is the
+// authoritative liquidation mark, including any carried stale bid.
+function optQuoteInfoHtml(p) {
+  const quote = (v) => v != null && v !== "" && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null;
+  const bid = quote(p.current_bid), ask = quote(p.current_ask), mid = quote(p.current_mid);
+  const money = (v) => v != null ? "$" + v.toFixed(2) : "—";
+  const spread = bid != null && ask != null && ask >= bid ? ask - bid : null;
+  const pct = spread != null && mid > 0 ? " (" + (spread / mid * 100).toFixed(1) + "% of mid)" : "";
+  return "<div class=\"dim\" style=\"font-size:10px;white-space:nowrap;\">bid " + money(bid) +
+    " · ask " + money(ask) + " · mid " + money(mid) + " · spread " + money(spread) + pct + "</div>";
+}
+
 function optOpenPositionsHtml(positions, summary = null) {
   if (!positions.length) {
     return (
@@ -702,8 +722,8 @@ function optOpenPositionsHtml(positions, summary = null) {
       ? " <span style=\"color:var(--accent-yellow);font-size:10px;\" title=\"Near expiry — force-close at 3 DTE\">⏳</span>" : "";
     const stopFlag = pnlPct != null && pnlPct <= -50
       ? " <span style=\"color:var(--accent-red);font-size:10px;\" title=\"Near stop-loss (-60%)\">⚠</span>" : "";
-    const stale = (p.price_source === "carried" || p.price_source === "intrinsic")
-      ? " <span class=\"dim\" style=\"font-size:10px;\" title=\"Quote unavailable — carried mark\">(stale)</span>" : "";
+    const stale = (p.quote_stale || p.stale_count > 0 || p.price_source === "carried_bid" || p.price_source === "carried" || p.price_source === "intrinsic")
+      ? " <span class=\"dim\" style=\"font-size:10px;\" title=\"Bid unavailable — carried liquidation mark\">(stale)</span>" : "";
     return (
       "<tr>" +
         "<td>" + optContractLabel(p) + "</td>" +
@@ -711,7 +731,7 @@ function optOpenPositionsHtml(positions, summary = null) {
         "<td>" + (dte != null ? dte + "d" + dteFlag : "—") + "</td>" +
         "<td style=\"font-weight:600;\">" + p.contracts + "</td>" +
         "<td>$" + entry.toFixed(2) + "</td>" +
-        "<td>" + (mark != null ? "$" + mark.toFixed(2) + stale : "<span class=\"dim\">—</span>") + "</td>" +
+        "<td>" + (mark != null ? "$" + mark.toFixed(2) + stale : "<span class=\"dim\">—</span>") + optQuoteInfoHtml(p) + "</td>" +
         "<td>" + optPctCell(pnlPct) + (stopFlag || "") + "</td>" +
         "<td>" + optMoneyCell(cost) + "</td>" +
         "<td>" + optMoneyCell(value != null ? value : cost) + "</td>" +
@@ -724,7 +744,7 @@ function optOpenPositionsHtml(positions, summary = null) {
       "<div class=\"panel-title\">[ Open Positions — " + positions.length + " contracts ]</div>" +
       "<div style=\"overflow-x:auto;\">" +
         "<table class=\"spy-table\">" +
-          "<thead><tr><th>Contract</th><th>Signal</th><th>DTE</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th title=\"Total cost at entry\">Start</th><th title=\"Current total value\">End</th><th>Rationale</th></tr></thead>" +
+          "<thead><tr><th>Contract</th><th>Signal</th><th>DTE</th><th>Qty</th><th>Entry</th><th title=\"Liquidation value at bid\">Mark (bid)</th><th>P&amp;L</th><th title=\"Total cost at entry\">Start</th><th title=\"Current total value\">End</th><th>Rationale</th></tr></thead>" +
           "<tbody>" + rows + "</tbody>" +
           optOpenTotalsHtml(positions, summary) +
         "</table>" +

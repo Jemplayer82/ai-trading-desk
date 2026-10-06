@@ -46,7 +46,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import secret_box
+from . import options_fills, secret_box
 
 _HOME = Path(os.path.expanduser("~")) / ".tradingagents"
 # Same default path in every container — ~/.tradingagents is the shared
@@ -257,6 +257,8 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     stop_limit_offset REAL,
     stage_trigger_pct REAL,
     stage_trail_pct REAL,
+    fill_model TEXT NOT NULL DEFAULT 'bid_ask',
+    fill_model_cutover TEXT,
     -- Names are unique per tab (kind): an options account may share a name
     -- with an S&P account. See _migrate_paper_account_names_per_kind.
     UNIQUE (kind, name)
@@ -284,6 +286,12 @@ CREATE TABLE IF NOT EXISTS options_positions (
     entry_delta REAL,
     entry_bid REAL,
     entry_ask REAL,
+    fill_model TEXT NOT NULL DEFAULT 'mid_legacy',
+    current_bid REAL,
+    current_ask REAL,
+    current_mid REAL,
+    exit_bid REAL,
+    exit_ask REAL,
     entry_oi INTEGER,
     signal TEXT,
     conviction INTEGER,
@@ -355,6 +363,20 @@ CREATE INDEX IF NOT EXISTS idx_options_ledger_acct
 # Append-only and idempotent: every entry is checked on every boot and
 # skipped if the column already exists. New columns go in SCHEMA *and* here.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("paper_accounts", "fill_model", "TEXT NOT NULL DEFAULT 'bid_ask'"),
+    ("paper_accounts", "fill_model_cutover", "TEXT"),
+    ("options_positions", "entry_bid", "REAL"),
+    ("options_positions", "entry_ask", "REAL"),
+    ("options_positions", "current_premium", "REAL"),
+    ("options_positions", "current_value", "REAL"),
+    ("options_positions", "stale_count", "INTEGER DEFAULT 0"),
+    ("options_positions", "price_source", "TEXT"),
+    ("options_positions", "fill_model", "TEXT NOT NULL DEFAULT 'mid_legacy'"),
+    ("options_positions", "current_bid", "REAL"),
+    ("options_positions", "current_ask", "REAL"),
+    ("options_positions", "current_mid", "REAL"),
+    ("options_positions", "exit_bid", "REAL"),
+    ("options_positions", "exit_ask", "REAL"),
     ("spy_scans", "cancel_requested", "INTEGER DEFAULT 0"),
     ("spy_scans", "previous_scan_id", "INTEGER"),
     ("spy_scans", "starting_value", "REAL"),
@@ -454,6 +476,14 @@ def init_db() -> None:
             if all((table, column) in applied for (table, column) in key):
                 conn.execute(sql)
         _migrate_paper_account_names_per_kind(conn)
+        conn.execute("UPDATE paper_accounts SET fill_model_cutover = ? WHERE kind = 'options' AND fill_model_cutover IS NULL",
+                     (datetime.utcnow().isoformat(timespec="seconds") + "Z",))
+        if ("options_positions", "current_bid") in applied:
+            # Open legacy rows transition to liquidation accounting. Closed history is immutable.
+            conn.execute("""UPDATE options_positions SET current_bid = entry_bid,
+                current_premium = entry_bid, current_value = entry_bid * 100 * contracts,
+                peak_premium = entry_bid, stop_level_hwm = NULL, stale_count = COALESCE(stale_count, 0) + 1,
+                price_source = 'carried_bid' WHERE status = 'open'""")
         _encrypt_existing_secrets(conn)
     # The DB holds API keys, OAuth secrets and password hashes — keep it readable
     # only by the owning service account, not world/group (umask can leave it 644).
@@ -1776,7 +1806,7 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
 _PAPER_ACCOUNT_COLUMNS = (
     "id", "name", "starting_capital", "aggressiveness", "bias", "created_at",
     "kind", "schedule_time", "stop_type", "stop_value", "stop_limit_offset",
-    "stage_trigger_pct", "stage_trail_pct",
+    "stage_trigger_pct", "stage_trail_pct", "fill_model", "fill_model_cutover",
 )
 _PAPER_ACCOUNT_SELECT = ", ".join(_PAPER_ACCOUNT_COLUMNS)
 
@@ -1800,11 +1830,12 @@ def create_paper_account(
     """
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct, fill_model_cutover) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, starting_capital, aggressiveness, bias,
              datetime.utcnow().isoformat(timespec="seconds") + "Z", kind,
-             schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct),
+             schedule_time, stop_type, stop_value, stop_limit_offset, stage_trigger_pct, stage_trail_pct,
+             datetime.utcnow().isoformat(timespec="seconds") + "Z" if kind == "options" else None),
         )
         return int(cur.lastrowid)
 
@@ -1952,12 +1983,20 @@ def open_options_position(paper_account_id: int, scan_id: int, pos: dict[str, An
     """Open a position and debit its premium from the ledger atomically.
 
     pos requires: occ_symbol, underlying, put_call, strike, expiration_date,
-    contracts, entry_premium; optional: entry_underlying, entry_delta,
-    entry_bid, entry_ask, entry_oi, signal, conviction, rationale, data_source.
-    cost_basis is computed here (premium x 100 x contracts).
+    contracts, entry_bid, entry_ask; optional: entry_underlying, entry_delta, entry_oi, signal, conviction, rationale, data_source.
+    cost_basis is computed here (ask x 100 x contracts). Invalid quotes return 0.
     """
-    contracts = int(pos["contracts"])
-    entry_premium = float(pos["entry_premium"])
+    raw_contracts = options_fills.price(pos.get("contracts"))
+    if raw_contracts is None or raw_contracts < 1 or raw_contracts != int(raw_contracts):
+        return 0
+    contracts = int(raw_contracts)
+    entry_premium, _reason = options_fills.buy_quote(pos.get("entry_bid"), pos.get("entry_ask"))
+    if entry_premium is None or contracts <= 0:
+        return 0
+    entry_bid = float(pos["entry_bid"])
+    strike = options_fills.price(pos.get("strike"))
+    if strike is None:
+        return 0
     cost_basis = round(entry_premium * 100 * contracts, 2)
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with connect() as conn:
@@ -1970,15 +2009,15 @@ def open_options_position(paper_account_id: int, scan_id: int, pos: dict[str, An
                        entry_underlying, entry_delta, entry_bid, entry_ask, entry_oi,
                        signal, conviction, rationale, status, opened_at,
                        current_premium, current_value, last_marked_at, price_source, data_source,
-                       peak_premium)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)""",
+                       peak_premium, fill_model, current_bid, current_ask, current_mid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 'bid_ask', ?, ?, ?)""",
                 (paper_account_id, scan_id, pos["occ_symbol"], pos["underlying"], pos["put_call"],
-                 float(pos["strike"]), pos["expiration_date"], contracts, entry_premium, cost_basis,
+                 strike, pos["expiration_date"], contracts, entry_premium, cost_basis,
                  pos.get("entry_underlying"), pos.get("entry_delta"), pos.get("entry_bid"),
                  pos.get("entry_ask"), pos.get("entry_oi"),
                  pos.get("signal"), pos.get("conviction"), pos.get("rationale"), now,
-                 entry_premium, cost_basis, now, pos.get("data_source"), pos.get("data_source"),
-                 entry_premium),
+                 entry_bid, round(entry_bid * 100 * contracts, 2), now, pos.get("data_source"), pos.get("data_source"),
+                 entry_bid, entry_bid, entry_premium, (entry_bid + entry_premium) / 2),
             )
             position_id = int(cur.lastrowid)
             conn.execute(
@@ -2002,6 +2041,8 @@ def close_options_position(
     exit_underlying: float | None = None,
     exit_underlying_source: str | None = None,
     closed_at: str | None = None,
+    exit_bid: float | None = None,
+    exit_ask: float | None = None,
 ) -> bool:
     """Close an open position at exit_premium and credit proceeds atomically.
 
@@ -2018,31 +2059,45 @@ def close_options_position(
     """
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     closed_at = closed_at or now
-    exit_premium = round(float(exit_premium), 4)
+    exit_premium = options_fills.price(exit_premium)
+    if exit_premium is None:
+        return False
+    exit_premium = round(exit_premium, 4)
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT paper_account_id, contracts, cost_basis, occ_symbol FROM options_positions "
+                "SELECT * FROM options_positions "
                 "WHERE id = ? AND status = 'open'",
                 (position_id,),
             ).fetchone()
             if not row:
                 conn.execute("ROLLBACK")
                 return False
+            # Every close path records quote evidence, including carried (stale) bids.
+            bid = options_fills.price(exit_bid)
+            if bid is None:
+                bid, _reason = options_fills.sell_quote(row["current_bid"], row["entry_bid"])
+                if bid is None:
+                    conn.execute("ROLLBACK")
+                    return False
+            exit_premium = bid
+            ask = options_fills.price(exit_ask if exit_ask is not None else row["current_ask"])
             exit_value = round(exit_premium * 100 * int(row["contracts"]), 2)
             realized = round(exit_value - float(row["cost_basis"]), 2)
+            if options_fills.price(row["current_bid"]) is None or row["price_source"] == "carried_bid":
+                conn.execute("UPDATE options_positions SET stale_count = MAX(COALESCE(stale_count,0),1) WHERE id = ?", (position_id,))
             conn.execute(
                 """UPDATE options_positions
                    SET status = 'closed', closed_at = ?, exit_premium = ?, exit_value = ?,
                        realized_pnl = ?, exit_reason = ?, close_scan_id = ?,
                        current_premium = ?, current_value = ?, last_marked_at = ?,
-                       exit_underlying = ?, exit_underlying_source = ?
+                       exit_underlying = ?, exit_underlying_source = ?, exit_bid = ?, exit_ask = ?
                    WHERE id = ? AND status = 'open'""",
                 (closed_at, exit_premium, exit_value, realized, exit_reason, close_scan_id,
                  exit_premium, exit_value, now,
                  exit_underlying, exit_underlying_source if exit_underlying is not None else None,
-                 position_id),
+                 bid, ask, position_id),
             )
             conn.execute(
                 "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
@@ -2062,51 +2117,22 @@ def settle_options_position(
     intrinsic: float,
     settlement_close: float,
 ) -> bool:
-    """Settle an expired position at intrinsic value (0 => expired worthless).
+    """Liquidate expiry at the recorded bid; intrinsic/settlement_close are informational.
 
-    Models OCC auto-exercise: ITM by >= $0.01 settles at intrinsic computed from
-    the underlying's close; anything less expires worthless. Idempotent via the
-    status = 'open' guard.
+    Kept as a compatibility entry point. This paper policy does not model exercise.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    intrinsic = max(0.0, round(float(intrinsic), 4))
-    itm = intrinsic >= 0.01
-    status = OPTION_POSITION_EXPIRED_ITM if itm else OPTION_POSITION_EXPIRED_WORTHLESS
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            row = conn.execute(
-                "SELECT paper_account_id, contracts, cost_basis, occ_symbol FROM options_positions "
-                "WHERE id = ? AND status = 'open'",
-                (position_id,),
-            ).fetchone()
-            if not row:
-                conn.execute("ROLLBACK")
-                return False
-            exit_premium = intrinsic if itm else 0.0
-            exit_value = round(exit_premium * 100 * int(row["contracts"]), 2)
-            realized = round(exit_value - float(row["cost_basis"]), 2)
-            conn.execute(
-                """UPDATE options_positions
-                   SET status = ?, closed_at = ?, exit_premium = ?, exit_value = ?,
-                       realized_pnl = ?, exit_reason = 'expiry', settlement_close = ?,
-                       current_premium = ?, current_value = ?, last_marked_at = ?
-                   WHERE id = ? AND status = 'open'""",
-                (status, now, exit_premium, exit_value, realized, float(settlement_close),
-                 exit_premium, exit_value, now, position_id),
-            )
-            # Zero-amount rows for worthless expiries are kept as audit records.
-            conn.execute(
-                "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
-                "VALUES (?, ?, 'expire', ?, NULL, ?, ?)",
-                (int(row["paper_account_id"]), now, exit_value, position_id,
-                 f"expire {row['occ_symbol']} ({status})"),
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    return True
+    # The paper policy liquidates at bid, including expiry; intrinsic is informational.
+    pos = get_options_position(position_id)
+    if not pos or pos.get("status") != "open":
+        return False
+    bid, _reason = options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))
+    if bid is None:
+        bump_options_position_stale(position_id)
+        return False
+    bump_options_position_stale(position_id)
+    return close_options_position(position_id, bid, "expiry", exit_bid=bid,
+                                  exit_ask=pos.get("current_ask"))
+
 
 
 def list_options_positions(
@@ -2156,22 +2182,37 @@ def mark_options_position(
     value: float,
     price_source: str,
     reset_stale: bool = True,
+    *,
+    ask: float | None = None,
 ) -> None:
     """Record a mark-to-market price on an open position (read-only w.r.t. cash)."""
+    premium = options_fills.price(premium)
+    if premium is None:
+        bump_options_position_stale(position_id)
+        return
+    ask = options_fills.price(ask)
+    if ask is not None and ask < premium:
+        ask = None
+    mid = (premium + ask) / 2 if ask is not None else None
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     stale_sql = ", stale_count = 0" if reset_stale else ", stale_count = stale_count + 1"
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT contracts FROM options_positions WHERE id = ? AND status = 'open'", (position_id,)).fetchone()
+        if row is None:
+            conn.rollback()
+            return
+        value = premium * 100 * int(row["contracts"])
         conn.execute(
             "UPDATE options_positions SET current_premium = ?, current_value = ?, "
-            "peak_premium = MAX(COALESCE(peak_premium, entry_premium), ?), "
-            "last_marked_at = ?, price_source = ?" + stale_sql + " WHERE id = ? AND status = 'open'",
-            (round(float(premium), 4), round(float(value), 2), round(float(premium), 4),
-             now, price_source, position_id),
+            "peak_premium = MAX(COALESCE(peak_premium, entry_bid, 0), ?), "
+            "last_marked_at = ?, price_source = ?, current_bid = ?, current_ask = ?, current_mid = ?" + stale_sql + " WHERE id = ? AND status = 'open'",
+            (round(float(premium), 4), round(value, 2), round(float(premium), 4),
+             now, price_source, premium, ask, mid, position_id),
         )
 
         # Persist the staged ratchet on every mark, including carried marks.
-        # Stop execution still belongs to the existing fresh-quote/DTE paths.
+        # Stop execution belongs to the bid refresh/DTE paths.
         from web import account_policy
         row = conn.execute("SELECT * FROM options_positions WHERE id = ? AND status = 'open'", (position_id,)).fetchone()
         if row is not None:
@@ -2186,16 +2227,16 @@ def _evaluate_staged_stop(conn, pos, policy, prev_mark=None):
     """Compute and save under the writer transaction; evaluate() owns the rule."""
     from web import account_policy
     stored = conn.execute("SELECT peak_premium, stop_level_hwm FROM options_positions WHERE id = ?", (pos["id"],)).fetchone()
-    previous_level = pos.get("stop_level_hwm")
-    peak = max(float(pos.get("peak_premium") or 0), float(pos.get("current_premium") or 0))
+    previous_level = options_fills.price(pos.get("stop_level_hwm"))
+    peak = max(options_fills.price(pos.get("peak_premium")) or 0, options_fills.price(pos.get("current_bid")) or 0)
     if stored is not None:
-        peak = max(peak, float(stored["peak_premium"] or 0))
+        peak = max(peak, options_fills.price(stored["peak_premium"]) or 0)
         if stored["stop_level_hwm"] is not None:
-            previous_level = max(previous_level or 0, stored["stop_level_hwm"])
+            previous_level = max(previous_level or 0, options_fills.price(stored["stop_level_hwm"]) or 0)
     outcome = account_policy.evaluate(
-        policy, entry=pos["entry_premium"], peak=peak,
-        mark=pos.get("current_premium") if pos.get("current_premium") is not None else pos["entry_premium"],
-        prev_mark=prev_mark, stop_level_hwm=previous_level,
+        policy, entry=options_fills.stop_entry(pos), peak=peak,
+        mark=options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))[0] or 0,
+        prev_mark=options_fills.price(prev_mark), stop_level_hwm=previous_level, allow_zero_entry=True,
     )
     conn.execute(
         "UPDATE options_positions SET stop_level_hwm = MAX(COALESCE(stop_level_hwm, ?), ?) "
@@ -2216,7 +2257,7 @@ def evaluate_staged_options_stop(pos, policy, prev_mark=None):
 def arm_options_stop_limit(position_id: int, when: str | None = None) -> bool:
     """Mark a stop-limit trigger that could not fill yet.
 
-    The next refresh fills it at the limit price. Idempotent: only the FIRST
+    The next refresh fills at bid only when bid meets the limit. Idempotent: only the FIRST
     arming timestamp is kept.
     """
     stamp = when or (datetime.utcnow().isoformat(timespec="seconds") + "Z")

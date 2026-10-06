@@ -42,6 +42,7 @@ from . import (
     db,
     options_allocator,
     options_data,
+    options_fills,
     options_learning,
     research_engine,
 )
@@ -102,30 +103,19 @@ def settle_expired(paper_account_id: int | None = None) -> dict[str, Any]:
     open_positions = db.list_options_positions(paper_account_id, status="open")
     due = [p for p in open_positions if is_settleable(p["expiration_date"], now)]
     settled = worthless = failed = 0
-    close_cache: dict[tuple[str, str], float | None] = {}
     for pos in due:
-        key = (pos["underlying"], pos["expiration_date"])
-        if key not in close_cache:
-            close_cache[key] = underlying_close_on_or_before(*key)
-        close = close_cache[key]
-        if close is None:
-            n = db.bump_options_position_stale(pos["id"])
-            if n >= STALE_ALERT_THRESHOLD:
-                log.error(
-                    "[options] cannot settle position %s (%s exp %s) after %d attempts — "
-                    "no underlying close available",
-                    pos["id"], pos["occ_symbol"], pos["expiration_date"], n,
-                )
+        bid, _reason = options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))
+        # At expiry the last bid may be stale; no intrinsic or midpoint substitute.
+        db.bump_options_position_stale(pos["id"])
+        if bid is None:
             failed += 1
             continue
-        intr = intrinsic_value(pos["put_call"], pos["strike"], close)
-        if db.settle_options_position(pos["id"], intr, close):
-            if intr >= 0.01:
+        if db.close_options_position(pos["id"], bid, "expiry", exit_bid=bid,
+                                     exit_ask=pos.get("current_ask")):
+            if bid > 0:
                 settled += 1
             else:
                 worthless += 1
-            log.info("[options] settled %s at intrinsic $%.2f (close %.2f)",
-                     pos["occ_symbol"], intr, close)
     return {"due": len(due), "settled_itm": settled,
             "expired_worthless": worthless, "failed": failed}
 
@@ -152,13 +142,8 @@ def _yf_contract_price(pos: dict[str, Any], chain_cache: dict[tuple[str, str], A
     if rows.empty:
         return None
     row = rows.iloc[0]
-    bid, ask = row.get("bid"), row.get("ask")
-    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask >= bid:
-        return round((float(bid) + float(ask)) / 2, 4)
-    last = row.get("lastPrice")
-    if isinstance(last, (int, float)) and last > 0:
-        return float(last)
-    return None
+    return options_fills.quote_bid(row.get("bid"), row.get("ask"))
+
 
 
 def _underlying_prices(underlyings: list[str]) -> dict[str, float]:
@@ -206,59 +191,60 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
 
     marked = 0
     priced: dict[int, tuple[float, str]] = {}
+    asks: dict[int, float | None] = {}
     if positions and schwab_mcp.market_data_enabled():
         try:
-            quotes = schwab_mcp.get_quotes([p["occ_symbol"] for p in positions])
+            quotes = schwab_mcp.get_quotes([p["occ_symbol"] for p in positions]) or {}
         except Exception:
             log.exception("[options] Schwab option quotes failed")
-            quotes = None
-        if quotes:
-            for p in positions:
-                price = schwab_mcp.option_quote_price(quotes.get(p["occ_symbol"], {}))
-                if price:
-                    priced[p["id"]] = (price, "schwab")
+            quotes = {}
+        for p in positions:
+            quote = quotes.get(p["occ_symbol"], {})
+            q = (quote.get("quote") or {}) if isinstance(quote, dict) else {}
+            q = q if isinstance(q, dict) else {}
+            bid = options_fills.quote_bid(q.get("bidPrice"), q.get("askPrice"))
+            ask = options_fills.price(q.get("askPrice"))
+            if bid is not None:
+                priced[p["id"]] = (bid, "schwab")
+                asks[p["id"]] = ask
 
     chain_cache: dict[tuple[str, str], Any] = {}
     for p in positions:
         if p["id"] in priced:
             continue
-        price = _yf_contract_price(p, chain_cache)
-        if price:
-            priced[p["id"]] = (price, "yfinance")
-
-    # Carry-with-intrinsic-floor for anything still unpriced. Never mark to 0
-    # on a missing quote.
-    unpriced = [p for p in positions if p["id"] not in priced]
-    spots = _underlying_prices(sorted({p["underlying"] for p in unpriced})) if unpriced else {}
-    for p in unpriced:
-        carried = float(p.get("current_premium") or p.get("entry_premium") or 0)
-        spot = spots.get(p["underlying"])
-        intr = intrinsic_value(p["put_call"], p["strike"], spot) if spot else 0.0
-        price = max(carried, intr)
-        if price <= 0:
-            n = db.bump_options_position_stale(p["id"])
-            if n >= STALE_ALERT_THRESHOLD:
-                log.error("[options] no price for %s after %d refreshes", p["occ_symbol"], n)
-            continue
-        source = "intrinsic" if intr > carried else "carried"
-        db.mark_options_position(p["id"], price, price * 100 * int(p["contracts"]),
-                                 source, reset_stale=False)
-        n = int(p.get("stale_count") or 0) + 1
-        if n >= STALE_ALERT_THRESHOLD:
-            log.warning("[options] %s marked '%s' %d refreshes in a row",
-                        p["occ_symbol"], source, n)
-        marked += 1
+        bid = _yf_contract_price(p, chain_cache)
+        if bid is not None:
+            priced[p["id"]] = (bid, "yfinance")
+            chain = chain_cache.get((p["underlying"], p["expiration_date"]))
+            if chain is not None:
+                frame = chain.calls if p["put_call"].upper().startswith("C") else chain.puts
+                if frame is not None and not frame.empty:
+                    rows = frame[abs(frame["strike"] - float(p["strike"])) < 0.001]
+                    if not rows.empty:
+                        asks[p["id"]] = options_fills.price(rows.iloc[0].get("ask"))
 
     for p in positions:
         got = priced.get(p["id"])
-        if got:
-            price, source = got
-            db.mark_options_position(p["id"], price, price * 100 * int(p["contracts"]), source)
-            marked += 1
+        if got is None:
+            bid, _reason = options_fills.sell_quote(p.get("current_bid"), p.get("entry_bid"))
+            if bid is None:
+                db.bump_options_position_stale(p["id"])
+                continue
+            # Stale quotes still provide the stipulated last-valid-bid exit.
+            priced[p["id"]] = (bid, "carried_bid")
+            db.mark_options_position(p["id"], bid, bid * 100 * int(p["contracts"]),
+                                     "carried_bid", reset_stale=False)
+        else:
+            bid, source = got
+            db.mark_options_position(p["id"], bid, bid * 100 * int(p["contracts"]),
+                                     source, ask=asks.get(p["id"]))
+        marked += 1
 
     policies = {int(a["id"]): account_policy.StopPolicy.from_account(a)
                 for a in db.list_paper_accounts(kind="options")}
-    stopped = _apply_intraday_stops(positions, priced, policies)
+    # Only FRESH quotes can trigger a stop; a carried (stale) bid never sells a position.
+    fresh = {pid: got for pid, got in priced.items() if got[1] != "carried_bid"}
+    stopped = _apply_intraday_stops(positions, fresh, policies)
 
     # Roll fresh equity onto each affected account's latest completed scan row.
     accounts = ([db.get_paper_account(paper_account_id)] if paper_account_id
@@ -342,33 +328,12 @@ def _apply_intraday_stops(
     priced: dict[int, tuple[float, str]],
     policies: dict[int, account_policy.StopPolicy],
 ) -> int:
-    """Emulate a standing stop order between daily allocations.
+    """Evaluate bid-based stops and fill at the decision-time bid.
 
-    The level now comes from each account's configured stop policy
-    (StopPolicy). Previously a flat -60% stop was enforced only once a day,
-    at the 09:35 allocation, filled at THAT moment's price — a position
-    could crash through the stop at 10:30 and ride a full day past it. Now
-    every hourly refresh checks freshly quoted positions and closes breaches
-    immediately.
-
-    Fill convention (standard backtest rule):
-      - previous mark ABOVE the stop, new quote at/below it -> the price
-        crossed the level sometime this interval, so fill AT the stop level,
-        like a working stop order would have;
-      - first observation already below the stop (overnight gap / never
-        marked) -> fill at the observed quote, because a real stop order gaps
-        through too. No pretending we caught a level the market never traded.
-
-    Stop-limit adds an arm/resting-fill state: a trigger that gaps through
-    the limit becomes a resting stop-limit order; it fills on a later
-    refresh if the fresh quote is back at or above the limit price, and
-    remains armed (no fill) while the quote stays below the limit.
-
-    Only fresh quotes (schwab/yfinance) can trigger — a carried or intrinsic
-    mark is a guess, and a guess must never realize a loss. Positions the
-    refresh couldn't price simply wait for the next refresh or the daily
-    allocator's forced_closes, which stays as the backstop. Kill switch:
-    options_intraday_stop / TRADINGAGENTS_OPTIONS_INTRADAY_STOP.
+    Stop-limit triggers can arm below their limit and only fill once bid meets
+    the limit. Missing quotes carry the last valid bid, flagged stale. Stop
+    fills never use a trigger-level interpolation or a backdated timestamp.
+    Kill switch: options_intraday_stop / TRADINGAGENTS_OPTIONS_INTRADAY_STOP.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -390,16 +355,16 @@ def _apply_intraday_stops(
         if not got:
             continue
         price, _source = got
-        entry = float(p.get("entry_premium") or 0)
-        if entry <= 0:
+        price = options_fills.price(price)
+        if price is None:
+            db.bump_options_position_stale(p["id"])
             continue
-
         policy = policies.get(int(p.get("paper_account_id") or 0), account_policy.NONE)
         prev_mark = p.get("current_premium")
         outcome = options_allocator.effective_stop_level(
-            dict(p, current_premium=price),
+            dict(p, current_premium=price, current_bid=price),
             policy,
-            prev_mark=float(prev_mark) if prev_mark is not None else None,
+            prev_mark=options_fills.price(prev_mark),
         )
 
         if outcome.action == "arm":
@@ -416,19 +381,13 @@ def _apply_intraday_stops(
 
         stop_level = outcome.level
         stop_reason = outcome.exit_reason
-        fill = outcome.fill_price
+        fill = price
         crossed_this_interval = outcome.crossed
 
-        # Book the sale at the minute the level was actually crossed, not at
-        # the top of the hour the refresh happened to notice it.
+        # Execution is at this observed bid and decision timestamp, never an inferred crossing.
         closed_at = None
         exit_u: float | None = None
         exit_src: str | None = None
-        if crossed_this_interval:
-            back = _backtrack_stop_crossing(p, float(prev_mark), stop_level, price)
-            if back:
-                closed_at, exit_u = back
-                exit_src = "backtracked"
         if exit_u is None:
             if p["underlying"] not in spot_cache:
                 try:
@@ -440,7 +399,7 @@ def _apply_intraday_stops(
         ok = db.close_options_position(
             int(p["id"]), exit_premium=fill, exit_reason=stop_reason,
             exit_underlying=exit_u, exit_underlying_source=exit_src,
-            closed_at=closed_at,
+            closed_at=closed_at, exit_bid=price,
         )
         if ok:
             stopped += 1
@@ -456,8 +415,8 @@ def _apply_intraday_stops(
 def account_equity(paper_account_id: int) -> dict[str, float]:
     cash = db.options_cash_balance(paper_account_id)
     open_positions = db.list_options_positions(paper_account_id, status="open")
-    open_value = sum(float(p.get("current_value") or p.get("cost_basis") or 0)
-                     for p in open_positions)
+    open_value = sum((options_fills.sell_quote(p.get("current_bid"), p.get("entry_bid"))[0] or 0)
+                     * 100 * int(p["contracts"]) for p in open_positions)
     deployed = sum(float(p.get("cost_basis") or 0) for p in open_positions)
     return {"cash": round(cash, 2), "open_value": round(open_value, 2),
             "deployed": round(deployed, 2), "equity": round(cash + open_value, 2)}
@@ -483,6 +442,8 @@ def account_summary(paper_account_id: int) -> dict[str, Any]:
         "open_count": len(open_positions),
         "closed_count": len(settled),
         "funded": funded,
+        "fill_model": acct.get("fill_model", "bid_ask"),
+        "fill_model_cutover": acct.get("fill_model_cutover"),
     }
 
 
@@ -667,8 +628,10 @@ def run_options_allocation(scan_id: int, trade_date: str) -> None:
         decisions_log: list[dict[str, Any]] = []
         for c in alloc["closes"]:
             pos = db.get_options_position(int(c["position_id"])) or {}
-            exit_premium = float(c.get("exit_premium") or pos.get("current_premium")
-                                 or pos.get("entry_premium") or 0)
+            exit_premium, reason = options_fills.sell_quote(pos.get("current_bid"), pos.get("entry_bid"))
+            if exit_premium is None:
+                db.bump_options_position_stale(pos["id"])
+                continue
             exit_spot = spot_by_underlying.get(pos.get("underlying"))
             if db.close_options_position(int(c["position_id"]), exit_premium,
                                          c["exit_reason"], close_scan_id=scan_id,
@@ -691,14 +654,14 @@ def run_options_allocation(scan_id: int, trade_date: str) -> None:
             if o["cost"] > cash_now + 0.01:
                 skipped_opens.append(f"{contract['occ_symbol']}: cost ${o['cost']:,.0f} > cash ${cash_now:,.0f}")
                 continue
-            db.open_options_position(account_id, scan_id, {
+            position_id = db.open_options_position(account_id, scan_id, {
                 "occ_symbol": contract["occ_symbol"],
                 "underlying": contract["underlying"],
                 "put_call": contract["put_call"],
                 "strike": contract["strike"],
                 "expiration_date": contract["expiration_date"],
                 "contracts": o["contracts"],
-                "entry_premium": contract["mid"],
+                "entry_premium": contract["ask"],
                 "entry_underlying": contract.get("underlying_price"),
                 "entry_delta": contract.get("delta"),
                 "entry_bid": contract.get("bid"),
@@ -709,9 +672,12 @@ def run_options_allocation(scan_id: int, trade_date: str) -> None:
                 "rationale": o.get("rationale"),
                 "data_source": contract.get("source"),
             })
+            if not position_id:
+                skipped_opens.append(f"{contract['occ_symbol']}: invalid entry bid/ask")
+                continue
             decisions_log.append({
                 "occ_symbol": contract["occ_symbol"], "action": "NEW",
-                "contracts": o["contracts"], "entry_premium": contract["mid"],
+                "contracts": o["contracts"], "entry_premium": contract["ask"],
                 "cost": o["cost"], "rationale": o.get("rationale"),
                 "underlying": contract["underlying"], "put_call": contract["put_call"],
                 "strike": contract["strike"], "expiration_date": contract["expiration_date"],
