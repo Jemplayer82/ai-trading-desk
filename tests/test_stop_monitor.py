@@ -354,3 +354,15 @@ def test_actual_mcp_iso_quote_time(monitor_db, tmp_path, stamp):
     provider = QuotesOnly({SYMBOL: raw})
     assert monitor(provider, tmp_path).poll(now=NOW)["closed"] == 1
     assert row(monitor_db, pid)["exit_premium"] == 8
+
+
+def test_all_positions_missing_a_quote_counts_as_an_outage(monitor_db, tmp_path, monkeypatch):
+    open_position()
+    clock = [100.0]
+    monkeypatch.setattr(sm.time, "monotonic", lambda: clock[0])
+    provider = QuotesOnly({"errors": {"detail": "bad batch"}})  # truthy dict, no symbol keys
+    instance = monitor(provider, tmp_path)
+    for attempt in range(3):
+        clock[0] = 100.0 + 2 * attempt
+        assert instance.poll(now=NOW)["failed"]
+    assert len(rows(monitor_db, "stop_monitor_alerts")) == 1

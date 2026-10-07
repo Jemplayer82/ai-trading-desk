@@ -4,6 +4,11 @@ No real brokerage order placement/modification path is implemented. The provider
 has only get_quotes. Paper closing is the default; --dry-run is for verification.
 SQLite BEGIN IMMEDIATE is the same cross-process writer lock used by the scan's
 close path. Close, cash credit and trigger audit commit together.
+
+Intentional difference from the hourly scan: this monitor skips a 0.00 bid (counted as
+'invalid_bid') and never sells at zero, while web/options_fills.quote_bid treats a 0.00 bid with
+a positive ask as a real no-bid market that the hourly path may fill at $0. The hourly scan stays
+the fallback for those contracts.
 """
 from __future__ import annotations
 
@@ -267,7 +272,9 @@ class StopMonitor:
                     exclusions[action] += 1
             # Only a data-feed outage counts toward the alert: per-contract exclusions (a 0.00 bid on a
             # deep-OTM option, a stale quote after an early close) are normal and are reported, not alerted.
-            outage = bool(exclusions.get('api_error')) or bool(symbols and not quotes)
+            # A response with no usable quote for ANY position (an error dict, every symbol null) is an outage too.
+            outage = (bool(exclusions.get('api_error')) or bool(symbols and not quotes)
+                      or bool(report['rows_processed'] and exclusions.get('missing_quote', 0) >= report['rows_processed']))
             report['failed'] = outage
             if outage:
                 self.failures += 1
@@ -293,7 +300,7 @@ class StopMonitor:
         finally:
             self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.heartbeat_file.with_suffix('.tmp')
-            temporary.write_text(json.dumps(dict(timestamp=now.isoformat(), consecutive_failures=self.failures, **report), sort_keys=True))
+            temporary.write_text(json.dumps(dict(timestamp=iso_z(now), consecutive_failures=self.failures, **report), sort_keys=True))
             temporary.replace(self.heartbeat_file)
 
 
