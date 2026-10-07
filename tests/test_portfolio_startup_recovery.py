@@ -30,7 +30,11 @@ def startup_env(tmp_db, monkeypatch):
     kicks: list[int] = []
     monkeypatch.setattr(creds, "apply_to_env", lambda *a, **k: None)
     monkeypatch.setattr(creds, "apply_settings_to_env", lambda *a, **k: None)
-    monkeypatch.setattr(features, "enabled", lambda name: True)
+    # Recovery runs whenever sp500 is on. Every other feature follows the build's
+    # tier: forcing "options" on in a tier-3 strip makes _startup import
+    # rules_engine, which make_tier removed.
+    real_enabled = features.enabled
+    monkeypatch.setattr(features, "enabled", lambda name: name == "sp500" or real_enabled(name))
     monkeypatch.setattr(alerts, "notify_run_failed", lambda **kw: sent.append(kw))
     monkeypatch.setattr(scan_queue, "_advance_queue_if_idle", lambda: kicks.append(1))
     return sent, kicks
