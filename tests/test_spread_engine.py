@@ -330,3 +330,16 @@ def test_rich_put_end_to_end_order_floor_and_tp(tmp_db):
     assert se.poll_once(f.as_feeds(), now)["filled"] == 1
     (p,) = _rows("SELECT * FROM spread_positions")
     assert p["tp_price"] == pytest.approx(round(0.5 * p["credit"], 2))           # 50% kept
+
+
+def test_recent_closes_parse_and_signal_column_migration(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / "old.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    with sqlite3.connect(path) as c:      # the tables as created before the signal column existed
+        c.executescript(se.SCHEMA.replace("    signal TEXT,\n", ""))
+        assert "signal" not in {r[1] for r in c.execute("PRAGMA table_info(spread_orders)")}
+    se._INIT["path"] = None
+    se.init_tables()
+    with db.connect() as conn:
+        assert "signal" in {r["name"] for r in conn.execute("PRAGMA table_info(spread_orders)")}

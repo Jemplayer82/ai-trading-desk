@@ -182,6 +182,9 @@ def init_tables() -> None:
         return
     with db.connect() as conn:
         conn.executescript(SCHEMA)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(spread_orders)")}
+        if "signal" not in cols:   # tables created before the rich_put type
+            conn.execute("ALTER TABLE spread_orders ADD COLUMN signal TEXT")
     _INIT["path"] = str(db.DB_PATH)
 
 
@@ -295,7 +298,7 @@ def scan(contracts: list[dict[str, Any]], spot: float, structure: str) -> dict[s
 
 
 def _atm_iv(cs: list[dict[str, Any]], spot: float) -> float | None:
-    near = sorted(cs, key=lambda c: abs(c["strike"] - spot))[:4]
+    near = sorted((c for c in cs if c["bid"] > 0), key=lambda c: abs(c["strike"] - spot))[:4]
     ivs = [c["iv"] for c in near if 0.01 < c["iv"] < 5]
     return sum(ivs) / len(ivs) if ivs else None
 
@@ -331,10 +334,12 @@ def scan_rich_put(contracts: list[dict[str, Any]], spot: float, closes: dict[dat
         return None
     sd = spot * iv * math.sqrt(dte / 365)
     puts = [c for c in by_dte[dte] if c["put_call"] == "PUT"]
-    shorts = [c for c in puts if c["strike"] < spot and c["bid"] > 0]
-    if not shorts:
+    below = [c for c in puts if c["strike"] < spot]
+    if not below:
         return None
-    sp = min(shorts, key=lambda c: abs(c["strike"] - (spot - RICH_SHORT_SD * sd)))
+    sp = min(below, key=lambda c: abs(c["strike"] - (spot - RICH_SHORT_SD * sd)))
+    if sp["bid"] <= 0:          # same as the backtest: the nearest strike, skipped if it has no bid
+        return None
     longs = [c for c in puts if sp["strike"] - MAX_WIDTH - 1e-9 <= c["strike"] < sp["strike"]]
     if not longs:
         return None
@@ -516,10 +521,28 @@ def _earnings_dates(ticker: str) -> list[date]:
         return _CAL["dates"].get(ticker, [])
 
 
+def _recent_closes(ticker: str) -> dict[date, float]:
+    """~2 months of completed daily closes (enough for 20-day realized vol)."""
+    from tradingagents.dataflows import schwab_mcp
+    data = schwab_mcp.get_price_history(ticker, period_type="month", period=2) or {}
+    today = market_calendar.today_et()
+    out: dict[date, float] = {}
+    for c in data.get("candles") or []:
+        raw = c.get("datetime")
+        try:
+            d = (datetime.fromtimestamp(raw / 1000, market_calendar._ET).date() if isinstance(raw, (int, float))
+                 else date.fromisoformat(str(raw)[:10]))
+        except (ValueError, OSError, OverflowError):
+            continue
+        close = _num(c.get("close"))
+        if d < today and close:
+            out[d] = close
+    return out
+
+
 def default_feeds() -> Feeds:
-    from .rules_engine import _schwab_closes
     return Feeds(universe=_universe, chain=_schwab_chain, raw_quotes=_schwab_quotes, earnings_dates=_earnings_dates,
-                 daily_closes=_schwab_closes)
+                 daily_closes=_recent_closes)
 
 
 # ── accounts and equity ──────────────────────────────────────────────────────
