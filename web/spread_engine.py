@@ -16,8 +16,10 @@ Rule (each account has a `structure`: 'condor' or 'vertical'):
   wide is not a real price). No earnings report before expiry. Best candidate per ticker by the
   model's expected value; up to
   MAX_NEW_PER_DAY new orders a day, best first.
-- Size: max loss per spread <= 5% of account equity (whole contracts); all open + working max loss
-  <= 50% of equity; <= 10% of equity per underlying (several spreads per stock allowed).
+- Size: wings at most $5 wide; max loss per spread <= $500 and <= 5% of equity (whole contracts),
+  so each spread risks "a few hundred" and the account holds many; all open + working max loss
+  <= 50% of equity; <= 10% of equity per underlying (several spreads per stock allowed); up to 20
+  new orders a day.
 - Entry: a net-credit LIMIT at the mid ("set your price and wait"). The quote loop fills it only when
   the live natural credit (short bids - long asks) reaches the limit, at the limit. Every 10 minutes
   unfilled, the limit walks 1 cent toward the natural price but never below the price that keeps
@@ -51,7 +53,10 @@ COMMISSION = 0.65
 P_MIN, RR_MIN, TP_KEEP = 0.55, 1.5, 0.40
 DTE_MIN, DTE_MAX = 3, 45
 RISK_PER, RISK_TOTAL, RISK_PER_TICKER = 0.05, 0.50, 0.10
-MAX_NEW_PER_DAY = 10
+# Landon 10/07/2026: "each spread should only be a few hundred and in more" -> wings at most $5 and
+# at most $500 of max loss per spread (whole contracts), with more spreads open at once.
+MAX_WIDTH, MAX_LOSS_PER_SPREAD = 5.0, 500.0
+MAX_NEW_PER_DAY = 20
 ENTRY_DAYS = 3
 WALK_EVERY_S, WALK_STEP = 600, 0.01
 MAX_GAP_SHARE = 0.50   # liquidity: skip a spread whose natural credit is <= 0 or > 50% below its mid
@@ -226,7 +231,8 @@ def scan(contracts: list[dict[str, Any]], spot: float, structure: str) -> dict[s
         ck = {round(c["strike"], 4): c for c in calls}
         steps = sorted({round(b["strike"] - a["strike"], 4) for a, b in zip(puts, puts[1:], strict=False)}
                        | {round(b["strike"] - a["strike"], 4) for a, b in zip(calls, calls[1:], strict=False)})
-        widths = sorted({round(s * m, 4) for s in steps[:2] for m in (1, 2, 4, 5, 10)})
+        widths = sorted({round(s * m, 4) for s in steps[:2] for m in (1, 2, 4, 5, 10)} )
+        widths = [w for w in widths if w <= MAX_WIDTH + 1e-9]
         for w in widths:
             put_spreads = []
             for sp in puts:
@@ -277,7 +283,8 @@ def max_loss_per(width: float, credit: float, n_legs: int) -> float:
 
 
 def size(equity: float, width: float, credit: float, n_legs: int) -> int:
-    return max(0, math.floor(RISK_PER * equity / max_loss_per(width, credit, n_legs)))
+    budget = min(RISK_PER * equity, MAX_LOSS_PER_SPREAD)
+    return max(0, math.floor(budget / max_loss_per(width, credit, n_legs)))
 
 
 # ── live prices (pure) ───────────────────────────────────────────────────────

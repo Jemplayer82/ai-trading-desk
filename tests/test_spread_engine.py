@@ -115,7 +115,7 @@ def _rows(sql):
 def test_limit_fills_only_when_the_live_market_reaches_it(tmp_db):
     f = Feeds()
     aid, o = _setup_order(tmp_db, f)
-    assert o["limit_price"] == 0.62 and o["floor_price"] == 0.6 and o["contracts"] == 61   # $2,500 / $40.60
+    assert o["limit_price"] == 0.62 and o["floor_price"] == 0.6 and o["contracts"] == 12   # $500 cap / $40.60
     now = datetime(2026, 10, 7, 15, tzinfo=timezone.utc)
     f.q = {"P99": _q(0.70, 0.74, now), "P98": _q(0.08, 0.12, now)}  # natural 0.58 < limit 0.62
     r = se.poll_once(f.as_feeds(), now)
@@ -179,8 +179,10 @@ def test_expired_spread_settles_at_intrinsic(tmp_db):
 
 
 def test_sizing_caps(tmp_db):
-    # 5% of 50k = $2,500 per spread; a $10-wide spread at a $6 credit risks $400+fees -> 6 contracts
-    assert se.size(50_000, 10, 6.0, 2) == 6
+    # capped at $500 of max loss per spread: a $5-wide spread at a $3 credit risks $200+fees -> 2 contracts
+    assert se.size(50_000, 5, 3.0, 2) == 2
+    assert se.size(50_000, 5, 1.0, 2) == 1          # $402.60 -> 1 contract
+    assert se.size(50_000, 10, 6.0, 2) == 1
     assert se.size(5_000, 10, 1.0, 4) == 0          # too small: skip, never oversize
 
 
@@ -239,3 +241,9 @@ def test_fill_needs_fresh_sold_legs(tmp_db):
     assert se.poll_once(f.as_feeds(), now)["filled"] == 0
     f.q = {"P99": _q(0.74, 0.78, now), "P98": _q(0.10, 0.12, old)}   # quiet bought wing is fine
     assert se.poll_once(f.as_feeds(), now)["filled"] == 1
+
+
+def test_wings_capped_at_five_dollars():
+    puts = [_contract("P99", "PUT", 99, 0.70, 0.74, iv=10), _contract("P92", "PUT", 92, 0.0, 0.02, iv=10)]
+    spot, cs = se.parse_chain(_payload(100, puts, []), REF)
+    assert se.scan(cs, spot, "vertical") is None      # only a $7-wide spread exists: too wide
