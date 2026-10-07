@@ -23,7 +23,9 @@ paper-traded before anyone trusts them.
 - **As many positions as the account can support.** There is no fixed position-count cap.
   The count falls out of the risk budget (Section 3).
 - **Fills happen only when the market touches the limit**, on both entries and exits. No
-  midpoint fills (Section 5).
+  instant midpoint fills (Section 5).
+- **Entry pricing and the loss stop work the way thinkorswim does it:** limits prefilled at
+  the spread's mid, and a STOP that becomes a market order (Section 5).
 
 ## What the repo does today (and why this is a different engine)
 
@@ -135,35 +137,68 @@ breakeven win rate is roughly **67–75%**. The edge before costs is close to ze
 likely negative after four-leg slippage. This strategy is **unproven here**. The
 evaluation (Section 8) exists to find out.
 
-## 5. Fill model (limit-touch, entries and exits)
+## 5. Fill model (modeled on thinkorswim)
 
-No midpoint fills and no instant fills at the natural price. An order fills **only when the
-quoted market reaches the limit price**, and it fills at that limit price.
+Landon's rule: orders behave **the way thinkorswim (TOS) handles them**. No instant midpoint
+fills. Each structure is one multi-leg order priced as a single net credit or net debit, never
+leg by leg.
+
+**What TOS does (sources at the end of this section)**
+- A **LIMIT** order "seeks execution at the price you specify or better".
+- A **STOP** order becomes a **market order** once its activation price is reached, with no
+  guarantee the fill is near that price. A **STOP LIMIT** becomes a limit order instead.
+- A spread order's limit price is **prefilled at the mid** of the spread. The trader can
+  slide it toward the natural price.
+- The stop trigger can be STD, MARK, BID, ASK or LAST. **STD is the default.** For a sell
+  order STD triggers off the bid, and for a buy order off the ask.
 
 **Orders**
-- **Entry (credit structure):** limit credit = the structure's net mid at order time minus a
-  conservative haircut *(tunable, 25% of the net bid-ask width)*. It fills if the net
-  *natural* credit (sum of short-leg bids minus long-leg asks) is at or above the limit
-  credit. Otherwise it stays unfilled.
-- **Entry (butterfly debit):** limit debit = net mid plus the same haircut. It fills if the
-  net natural debit (long asks minus short bids) is at or below the limit.
-- **Exit at profit target:** a resting order to buy to close at the target debit (50% of the
-  credit). It fills if the net natural close cost is at or below the target.
-- **Exit at time stop / breach:** a limit to close at the net mid plus the haircut. It fills
-  when the market touches it.
-- **Loss stop:** triggers on the structure's mark (2× the credit). Once triggered, the close
-  executes at the **natural price** (buy shorts at the ask, sell longs at the bid). A stop
-  that waits for a limit touch could be skipped in a fast market. See open question 1.
+- **Entry (credit structure):** a NET CREDIT limit order at the structure's **net mid** (the
+  TOS prefill). It fills, at the limit, once the net natural credit (short-leg bids minus
+  long-leg asks) is at or above the limit. Otherwise it stays unfilled.
+- **Entry (butterfly):** a NET DEBIT limit at the net mid. It fills once the net natural debit
+  (long-leg asks minus short-leg bids) is at or below the limit.
+- **Exit at profit target:** a resting good-till-cancelled NET DEBIT limit to buy to close at
+  50% of the credit. It fills once the net natural close cost is at or below the target.
+- **Exit at time stop / breach:** a NET DEBIT limit to close at the net mid (the TOS prefill),
+  filled the same way.
+- **Loss stop:** a **STOP** order on the whole structure, buy to close, with the **STD
+  trigger**. Because it is a buy order, STD watches the ask side: it activates when the net
+  natural close cost (short-leg asks minus long-leg bids) reaches **2× the credit received**.
+  Once activated it is a market order, filled at the natural price observed on that run, even
+  if that is worse than the trigger.
 
-**Unfilled orders.** An order that has not filled by the end of the trading day is cancelled
-and re-evaluated on the next run from fresh quotes. Entries that fail to fill for 3
-consecutive days are dropped. Exit orders are never dropped, only re-priced.
+**Unfilled orders.** A day limit that has not filled by the close is cancelled and placed
+again on the next run at the new mid. Entries that fail to fill for 3 consecutive days are
+dropped. Exit orders are never dropped, only re-priced.
 
-**Paper limitation.** The engine observes quotes once per scheduled run, not continuously, so
-a price that touched the limit between runs is not seen. Fill rates will understate what a
-live resting order would catch, and results must be labelled accordingly. Record both the
-modeled net mid and the actual fill price per structure so the Section 8 slippage report is
-real.
+**What this model gets wrong, in both directions**
+- **Fills at mid are rarer here than in real life.** A mid limit on a liquid name often fills
+  live through price improvement from market makers. The paper engine cannot see that, so it
+  only fills when the natural price itself reaches the mid. Track the share of entries that
+  never fill. If it is high, the fix is to let the entry walk toward the natural price (see
+  open question 2), not to fill at mid.
+- **The engine sees quotes once per run.** A touch between runs is missed, which understates
+  limit fills, and a stop activates late, which overstates stop losses.
+- **STD stops can false-trigger.** On a four-leg structure the natural close cost is wide, so
+  a brief quote flicker can trip the stop even when the mark has barely moved. Practitioners
+  report exactly this on TOS spread stops in fast markets. MARK is the usual alternative
+  (open question 1).
+- Record the net mid and the actual fill on every order so the Section 8 slippage report is
+  real.
+
+**Sources.** thinkorswim Learning Center,
+[Order Types](https://toslc.thinkorswim.com/center/howToTos/thinkManual/Trade/Order-Entry-Tools/Order-Types)
+(LIMIT, STOP, STOP LIMIT definitions). Schwab,
+[How to Create Stop Orders on thinkorswim Desktop](https://www.schwabassetmanagement.com/story/how-to-create-stop-orders-on-thinkorswim-desktop)
+(trigger methods; STD uses the bid for sells and the ask for buys). Schwab,
+[Options Spread Orders on thinkorswim Desktop](https://www.schwab.com/learn/story/options-spread-orders-on-thinkorswim-desktop)
+(spread limit prefilled at mid, slider to natural). That page blocked direct reading, so the
+mid prefill is confirmed only through a search summary of it. **Not confirmed from a Schwab
+source:** that TOS accepts one STOP order on a whole multi-leg structure. Practitioner write-ups
+say it does, for example
+[Options Trades by Damocles](https://optionstradesbydamocles.com/2022/03/11/why-avoid-thinkorswim-stop-loss-strategies-for-vertical-spreads/).
+Check this in TOS before relying on it.
 
 ## 6. Exit and management rules
 
@@ -171,7 +206,8 @@ Evaluated every run, first match wins:
 
 1. **Profit target:** close at ≥ 50% of max profit (credit structures).
 2. **Time stop:** close at 21 DTE if still open. Rolling is out of scope for version 1.
-3. **Loss stop:** close if the structure's mark reaches 2× the credit received (loss ≈ 1× credit).
+3. **Loss stop:** close if the net natural close cost reaches 2× the credit received (loss ≈ 1×
+   credit). This is the STD-triggered STOP from Section 5.
 4. **Breach:** close if the underlying trades through a short strike by more than 1%.
 5. **Pre-expiry safety:** always close by 3 DTE. This matches the existing `DTE_FLOOR`.
 6. **Butterflies:** close at 25–40% of max profit or at 7 DTE.
@@ -250,10 +286,12 @@ margin behavior.
 
 ## Open questions
 
-1. Loss stop fill: execute at the natural price once triggered (current default), or wait for
-   a limit touch and risk skipping a fast move?
-2. Entry haircut: is 25% of the net bid-ask width the right starting point for the limit, or
-   should the limit be the net mid exactly?
+Resolved: entry price and loss-stop fill follow thinkorswim (Section 5).
+
+1. Loss-stop trigger: keep the TOS default STD (ask side, more false triggers on wide
+   four-leg markets), or switch to MARK (spread midpoint, fewer false triggers, later exits)?
+2. If too many mid-priced entries never fill, should an unfilled entry walk toward the
+   natural price by a fixed step each run, the way TOS traders slide the price?
 3. Does a time-based drawdown resume after 10 days feel right, or should the pause require a
    manual restart?
 4. Should rolling a tested side be added in version 2?
