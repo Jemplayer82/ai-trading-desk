@@ -55,7 +55,10 @@ MAX_NEW_PER_DAY = 10
 ENTRY_DAYS = 3
 WALK_EVERY_S, WALK_STEP = 600, 0.01
 MAX_GAP_SHARE = 0.50   # liquidity: skip a spread whose natural credit is <= 0 or > 50% below its mid
-POLL_S, STALE_S = 3.0, 20.0
+POLL_S = 3.0
+# Schwab's quoteTime only advances when a quote CHANGES, so a quiet far-OTM wing can show an old
+# stamp while still being the live market. A returned quote counts unless it is older than this.
+STALE_S = 900.0
 STRIKE_COUNT = 40
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "XLE", "XOP", "XLF", "SMH", "EEM", "GDX", "XBI", "KRE"]
 
@@ -144,9 +147,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_INIT: dict[str, Any] = {"path": None}
+
+
 def init_tables() -> None:
+    if _INIT["path"] == str(db.DB_PATH):
+        return
     with db.connect() as conn:
         conn.executescript(SCHEMA)
+    _INIT["path"] = str(db.DB_PATH)
 
 
 def _num(x: Any) -> float | None:
@@ -187,7 +196,7 @@ def parse_chain(payload: dict[str, Any], ref: date) -> tuple[float | None, list[
                 if not isinstance(c, dict):
                     continue
                 bid, ask, iv, k = _num(c.get("bid")), _num(c.get("ask")), _num(c.get("volatility")), _num(c.get("strikePrice"))
-                if None in (bid, ask, iv, k) or bid <= 0 or ask < bid or not 1 < iv < 500 or not c.get("symbol"):
+                if None in (bid, ask, iv, k) or bid < 0 or ask <= 0 or ask < bid or not 1 < iv < 500 or not c.get("symbol"):
                     continue
                 if c.get("nonStandard") or c.get("mini"):
                     continue
@@ -220,11 +229,15 @@ def scan(contracts: list[dict[str, Any]], spot: float, structure: str) -> dict[s
         for w in widths:
             put_spreads = []
             for sp in puts:
+                if sp["bid"] <= 0:
+                    continue
                 lp = pk.get(round(sp["strike"] - w, 4))
                 if lp:
                     put_spreads.append((sp, lp, sp["mid"] - lp["mid"], p_above(spot, sp["strike"], sp["iv"], dte)))
             call_spreads = []
             for sc in calls:
+                if sc["bid"] <= 0:
+                    continue
                 lc = ck.get(round(sc["strike"] + w, 4))
                 if lc:
                     call_spreads.append((sc, lc, sc["mid"] - lc["mid"], p_above(spot, sc["strike"], sc["iv"], dte)))
@@ -291,7 +304,7 @@ def validate(raw: Any, now: float) -> Quote | None:
             stamp = None
     elif _num(t) is not None:
         stamp = float(t) / 1000
-    if stamp is None or now - stamp > STALE_S or stamp - now > 2:
+    if stamp is None or now - stamp > STALE_S or stamp - now > 5:
         return None
     return Quote(bid, ask, stamp)
 
@@ -316,6 +329,15 @@ def mid_price(legs: list[dict], quotes: dict[str, Quote]) -> float | None:
 
 def walked_limit(limit: float, floor: float) -> float:
     return round(max(floor, limit - WALK_STEP), 2)
+
+
+def regular_close(q: dict[str, Any]) -> float | None:
+    """Regular-session (4:00 PM) price from a Schwab equity quote: last price minus any after-hours
+    change (options settle on the regular close, not extended-hours prints)."""
+    last = _num(q.get("lastPrice"))
+    if last is None:
+        return None
+    return last - (_num(q.get("postMarketChange")) or 0.0)
 
 
 def intrinsic(legs: list[dict], spot: float) -> float:
@@ -360,29 +382,37 @@ def _universe() -> list[str]:
     return list(dict.fromkeys(ETFS + names))
 
 
-_CAL: dict[str, Any] = {"day": None, "dates": {}}
+_CAL: dict[str, Any] = {"day": None, "dates": None}
+_CAL_LOCK = threading.Lock()
 
 
 def _earnings_dates(ticker: str) -> list[date]:
-    """Scheduled report dates (Alpha Vantage EARNINGS_CALENDAR, fetched once a day)."""
+    """Scheduled report dates (Alpha Vantage EARNINGS_CALENDAR, fetched once a day under a lock).
+    Raises if today's calendar could not be fetched: the scan then places nothing (fails closed)."""
     today = market_calendar.today_et()
-    if _CAL["day"] != today:
-        import csv
-        import io
+    with _CAL_LOCK:
+        if _CAL["day"] != today:
+            import csv
+            import io
 
-        from .rules_engine import _AvClient
-        dates: dict[str, list[date]] = {}
-        try:
-            text = _AvClient()("EARNINGS_CALENDAR", horizon="3month")
-            for r in csv.DictReader(io.StringIO(text if isinstance(text, str) else "")):
-                try:
-                    dates.setdefault(r["symbol"].upper(), []).append(date.fromisoformat(r["reportDate"]))
-                except (KeyError, ValueError):
-                    continue
-        except Exception:
-            log.exception("[spreads] earnings calendar failed; no earnings filter today")
-        _CAL.update(day=today, dates=dates)
-    return _CAL["dates"].get(ticker, [])
+            from .rules_engine import _AvClient
+            dates: dict[str, list[date]] | None = None
+            try:
+                text = _AvClient()("EARNINGS_CALENDAR", horizon="3month")
+                rows = list(csv.DictReader(io.StringIO(text if isinstance(text, str) else "")))
+                if rows:
+                    dates = {}
+                    for r in rows:
+                        try:
+                            dates.setdefault(r["symbol"].upper(), []).append(date.fromisoformat(r["reportDate"]))
+                        except (KeyError, ValueError):
+                            continue
+            except Exception:
+                log.exception("[spreads] earnings calendar failed")
+            _CAL["dates"], _CAL["day"] = dates, today
+        if _CAL["dates"] is None:
+            raise RuntimeError("earnings calendar unavailable today; no new spreads placed")
+        return _CAL["dates"].get(ticker, [])
 
 
 def default_feeds() -> Feeds:
@@ -448,6 +478,7 @@ def run_scan(feeds: Feeds | None = None, today: date | None = None) -> dict[str,
         run_id = _log_run("scan")
         found: dict[str, dict[str, dict]] = {"condor": {}, "vertical": {}}
         structures = {a["structure"] for a in accounts}
+        feeds.earnings_dates("SPY")      # load the calendar once; raises (no orders) if unavailable
 
         def one(t: str):
             payload = feeds.chain(t, today)
@@ -498,6 +529,7 @@ def _place(acct: dict[str, Any], cands: list[dict[str, Any]]) -> dict[str, Any]:
     with db.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            acct = dict(conn.execute("SELECT * FROM spread_accounts WHERE id = ?", (acct["id"],)).fetchone())
             equity, _ = _equity(conn, acct)
             busy = {r[0] for r in conn.execute(
                 "SELECT legs FROM spread_orders WHERE account_id = ? AND status = 'working' "
@@ -561,7 +593,9 @@ def market_open(now: datetime) -> bool:
 
 def poll_once(feeds: Feeds, now: datetime | None = None) -> dict[str, int]:
     """One pass: fetch live quotes for every working order and open spread; fill touched orders,
-    walk stale limits, take profits. Each fill commits in its own transaction."""
+    walk stale limits, take profits. Each fill commits in its own transaction. `now` is only passed
+    by tests (a fixed clock); live passes use the time after the quote fetch."""
+    explicit_now = now is not None
     now = now or datetime.now(timezone.utc)
     report = {"orders": 0, "positions": 0, "filled": 0, "walked": 0, "closed": 0, "unquoted": 0}
     with db.connect() as conn:
@@ -571,6 +605,8 @@ def poll_once(feeds: Feeds, now: datetime | None = None) -> dict[str, int]:
         return report
     symbols = sorted({l["symbol"] for x in orders + positions for l in json.loads(x["legs"])})
     raw = feeds.raw_quotes(symbols)
+    if not explicit_now:   # judge quote age against the time AFTER the fetch (the round trip takes time)
+        now = datetime.now(timezone.utc)
     stamp = now.timestamp()
     quotes = {s: q for s in symbols if (q := validate(raw.get(s), stamp)) is not None}
     report["orders"], report["positions"] = len(orders), len(positions)
@@ -659,7 +695,12 @@ def end_of_day(feeds: Feeds | None = None, today: date | None = None) -> dict[st
     today = today or market_calendar.today_et()
     init_tables()
     now = datetime.now(timezone.utc)
-    out = {"dropped": 0, "carried": 0, "settled": 0}
+    out = {"dropped": 0, "carried": 0, "settled": 0, "day": today.isoformat()}
+    with db.connect() as conn:
+        if conn.execute("SELECT 1 FROM spread_runs WHERE kind = 'eod' AND status = 'done' AND summary LIKE ?",
+                        (f'%"day": "{today.isoformat()}"%',)).fetchone():
+            return {"skipped": "end of day already ran today"}
+    run_id = _log_run("eod")
     with db.connect() as conn:
         for o in [dict(r) for r in conn.execute("SELECT * FROM spread_orders WHERE status = 'working'")]:
             expired = date.fromisoformat(o["expiration_date"]) <= today
@@ -674,19 +715,23 @@ def end_of_day(feeds: Feeds | None = None, today: date | None = None) -> dict[st
                                              (today.isoformat(),))]
     if due:
         raw = feeds.raw_quotes(sorted({p["ticker"] for p in due} | {"SPY"}))
+        unsettled = []
         for p in due:
-            q = (raw.get(p["ticker"]) or {}).get("quote") or {}
-            spot = _num(q.get("lastPrice")) or _num(q.get("closePrice"))
+            spot = regular_close((raw.get(p["ticker"]) or {}).get("quote") or {})
             if spot is None:
+                unsettled.append(p["ticker"])
                 continue
             _close(p, min(intrinsic(json.loads(p["legs"]), spot), p["width"]), "expiry", now, commission=False)
             out["settled"] += 1
+        if unsettled:
+            _alert("⚠️ Spread accounts: expired spreads not settled", "no price for " + ", ".join(sorted(set(unsettled))))
     spy = ((feeds.raw_quotes(["SPY"]).get("SPY") or {}).get("quote") or {}).get("lastPrice")
     with db.connect() as conn:
         for a in [dict(r) for r in conn.execute("SELECT * FROM spread_accounts WHERE active = 1")]:
             equity, open_cost = _equity(conn, a)
             conn.execute("INSERT OR REPLACE INTO spread_daily VALUES (?, ?, ?, ?, ?, ?)",
                          (a["id"], today.isoformat(), equity, a["cash"], open_cost, _num(spy)))
+    _end_run(run_id, "done", out)
     return out
 
 
@@ -705,22 +750,24 @@ def _loop() -> None:
         return
     feeds = default_feeds()
     while True:
-        started = time.monotonic()
-        now = datetime.now(timezone.utc)
+        started, wait = time.monotonic(), 30.0
         try:
+            now = datetime.now(timezone.utc)
             if market_open(now):
-                _LOOP["last"] = poll_once(feeds, now)
+                _LOOP["last"] = poll_once(feeds)
                 _LOOP["failures"] = 0
+                wait = max(0.5, POLL_S - (time.monotonic() - started))
         except Exception:
             _LOOP["failures"] += 1
+            wait = POLL_S
             log.exception("[spreads] quote loop pass failed")
             if _LOOP["failures"] == 5:
                 _alert("⚠️ Spread account quote loop failing", "5 passes in a row failed; fills are paused.")
-        time.sleep(max(0.5, POLL_S - (time.monotonic() - started)) if market_open(now) else 30)
+        time.sleep(wait)
 
 
 def start_loop() -> None:
-    if _LOOP["thread"] is None:
+    if _LOOP["thread"] is None or not _LOOP["thread"].is_alive():
         t = threading.Thread(target=_loop, name="spread-quote-loop", daemon=True)
         t.start()
         _LOOP["thread"] = t

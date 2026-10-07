@@ -49,8 +49,12 @@ def create_spread_account(body: dict[str, Any] | None = None) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="starting_capital must be between 1,000 and 10,000,000")
     if any(a["name"] == name for a in spread_engine.list_accounts()):
         raise HTTPException(status_code=409, detail=f"a spread account named {name!r} already exists")
+    try:
+        new_id = spread_engine.create_account(name, structure, capital)
+    except Exception as exc:  # e.g. a same-name race hitting the UNIQUE constraint
+        raise HTTPException(status_code=409, detail=f"could not create the account: {exc}") from None
     spread_engine.start_loop()
-    return {"id": spread_engine.create_account(name, structure, capital)}
+    return {"id": new_id}
 
 
 @router.post("/api/options-spreads/scan")

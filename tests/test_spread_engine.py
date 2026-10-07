@@ -81,7 +81,7 @@ def test_prices_floor_and_intrinsic():
     assert se.walked_limit(0.61, 0.6) == 0.6 and se.walked_limit(0.6, 0.6) == 0.6
     assert se.intrinsic(legs, 97.0) == pytest.approx(1.0)            # capped by the long put
     assert se.intrinsic(legs, 100.0) == 0.0
-    stale = _q(1, 2, now - timedelta(seconds=30))
+    stale = _q(1, 2, now - timedelta(seconds=se.STALE_S + 10))
     assert se.validate(stale, now.timestamp()) is None
     assert se.validate(_q(2, 1, now), now.timestamp()) is None       # crossed
     assert se.validate(_q(0, 0.05, now), now.timestamp()) is not None  # no-bid wing is a real quote
@@ -158,8 +158,9 @@ def test_take_profit_and_carry_drop_and_expiry(tmp_db):
         conn.execute("INSERT INTO spread_orders (account_id, ticker, structure, legs, expiration_date, width, contracts, initial_mid, "
                      "limit_price, floor_price, placed_at, last_walk_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      (aid, "XYZ", "vertical", o["legs"], FRI, 1, 1, 0.62, 0.62, 0.6, now.isoformat(), now.isoformat()))
-    for _ in range(3):
-        se.end_of_day(f.as_feeds(), REF)
+    for k in range(3):
+        se.end_of_day(f.as_feeds(), REF + timedelta(days=k))
+    assert se.end_of_day(f.as_feeds(), REF + timedelta(days=2)) == {"skipped": "end of day already ran today"}
     assert _rows("SELECT status FROM spread_orders ORDER BY id")[-1]["status"] == "dropped"
 
 
@@ -169,7 +170,7 @@ def test_expired_spread_settles_at_intrinsic(tmp_db):
     now = datetime(2026, 10, 7, 15, tzinfo=timezone.utc)
     f.q = {"P99": _q(0.74, 0.78, now), "P98": _q(0.10, 0.12, now)}
     se.poll_once(f.as_feeds(), now)
-    f.q = {"XYZ": {"quote": {"lastPrice": 98.5}}, "SPY": {"quote": {"lastPrice": 600}}}
+    f.q = {"XYZ": {"quote": {"lastPrice": 98.7, "postMarketChange": 0.2}}, "SPY": {"quote": {"lastPrice": 600}}}
     se.end_of_day(f.as_feeds(), date.fromisoformat(FRI))
     (p,) = _rows("SELECT * FROM spread_positions")
     assert p["close_reason"] == "expiry" and p["close_price"] == pytest.approx(0.5)
@@ -194,7 +195,36 @@ def test_too_wide_a_market_is_skipped():
     # same rich mid as the passing case, but the natural credit is negative: not a real price
     puts = [_contract("P99", "PUT", 99, 0.40, 1.04, iv=10), _contract("P98", "PUT", 98, 0.0, 0.22, iv=10)]
     spot, cs = se.parse_chain(_payload(100, puts, []), REF)
-    assert [c for c in cs if c["symbol"] == "P98"] == []          # zero-bid long leg is dropped at parse
+    assert [c["bid"] for c in cs if c["symbol"] == "P98"] == [0.0]  # a no-bid wing is a real contract
+    assert se.scan(cs, spot, "vertical") is None
     puts = [_contract("P99", "PUT", 99, 0.40, 1.04, iv=10), _contract("P98", "PUT", 98, 0.01, 0.19, iv=10)]
     spot, cs = se.parse_chain(_payload(100, puts, []), REF)
     assert se.scan(cs, spot, "vertical") is None                  # mid 0.62 but natural 0.21: > 50% below
+
+
+def test_earnings_calendar_failure_places_nothing(tmp_db):
+    f = Feeds()
+    se.create_account("Verticals", "vertical", 50_000)
+    puts = [_contract("P99", "PUT", 99, 0.70, 0.74, iv=10), _contract("P98", "PUT", 98, 0.08, 0.12, iv=10)]
+    f.chains["XYZ"] = _payload(100, puts, [])
+    feeds = f.as_feeds()
+
+    def broken(t):
+        raise RuntimeError("earnings calendar unavailable today; no new spreads placed")
+    feeds.earnings_dates = broken
+    with pytest.raises(RuntimeError):
+        se.run_scan(feeds, REF)
+    assert _rows("SELECT * FROM spread_orders") == []
+    assert _rows("SELECT status FROM spread_runs")[0]["status"] == "failed"
+
+
+def test_regular_close_strips_after_hours():
+    assert se.regular_close({"lastPrice": 101.0, "postMarketChange": 1.0}) == 100.0
+    assert se.regular_close({"lastPrice": 101.0}) == 101.0
+    assert se.regular_close({}) is None
+
+
+def test_short_leg_needs_a_bid():
+    puts = [_contract("P99", "PUT", 99, 0.0, 0.74, iv=10), _contract("P98", "PUT", 98, 0.0, 0.12, iv=10)]
+    spot, cs = se.parse_chain(_payload(100, puts, []), REF)
+    assert se.scan(cs, spot, "vertical") is None
