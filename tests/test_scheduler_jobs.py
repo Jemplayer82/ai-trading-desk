@@ -42,16 +42,16 @@ class TestRegisterJobs:
             "spy_price_refresh", "research_scan", "research_retry",
         }
 
-    def test_tier4_registers_all_fifteen_jobs(self, monkeypatch):
+    def test_tier4_registers_all_seventeen_jobs(self, monkeypatch):
         ids = _registered_ids(monkeypatch, "schwab,sp500,options")
         assert ids == {
             "reap_stuck_runs", "outcome_sweep", "schedule_reconciler",
             "nightly_scan", "morning_newsletter", "token_health",
             "spy_price_refresh", "research_scan", "research_retry",
             "options_refresh", "options_refresh_close",
-            "options_settle", "options_grade", "rules_run", "rules_prepare",
+            "options_settle", "options_grade", "rules_run", "rules_prepare", "spreads_scan", "spreads_eod",
         }
-        assert len(ids) == 15
+        assert len(ids) == 17
 
     def test_schwab_alone_has_no_research_jobs(self, monkeypatch):
         ids = _registered_ids(monkeypatch, "schwab")

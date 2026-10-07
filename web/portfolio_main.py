@@ -56,17 +56,21 @@ if features.enabled("sp500"):
     app.include_router(research_routes.router)
     app.include_router(spy_routes.router)
 if features.enabled("options"):
-    from . import options_routes, rules_routes
+    from . import options_routes, rules_routes, spread_routes
     app.include_router(options_routes.router)
     app.include_router(rules_routes.router)
+    app.include_router(spread_routes.router)
 
 
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
     if features.enabled("options"):
-        from . import rules_engine
+        from . import rules_engine, spread_engine
         rules_engine.init_tables()
+        spread_engine.init_tables()
+        if spread_engine.list_accounts(active_only=True):
+            spread_engine.start_loop()   # live-quote fill loop for the spread accounts (no LLM)
     creds.apply_to_env()
     creds.apply_settings_to_env()
     # Clear any LLM-activity rows left stale by a previous crash so the

@@ -528,6 +528,16 @@ def job_rules_prepare() -> None:
     _post_rules("/api/options-rules/prepare", "rules_prepare")
 
 
+def job_spreads_scan() -> None:
+    """10:00 ET: scan for condor/vertical setups and place limit orders (rules-only spread accounts)."""
+    _post_rules("/api/options-spreads/scan", "spreads_scan")
+
+
+def job_spreads_eod() -> None:
+    """16:10 ET: carry/drop unfilled orders, settle expired spreads, snapshot equity."""
+    _post_rules("/api/options-spreads/eod", "spreads_eod")
+
+
 def job_options_grade() -> None:
     """Nightly options-ledger grading: backfill exit spots + batch-reflect.
 
@@ -1122,6 +1132,20 @@ def register_jobs(sched: BlockingScheduler) -> None:
             id="rules_prepare",
             replace_existing=True,
         )
+        sched.add_job(
+            job_spreads_scan,
+            # Spread accounts: scan + place limit orders once the open has settled.
+            CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=TIMEZONE),
+            id="spreads_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_spreads_eod,
+            # After the close: carry/drop unfilled orders, settle expiries, daily equity.
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone=TIMEZONE),
+            id="spreads_eod",
+            replace_existing=True,
+        )
 
 
 def main() -> None:
@@ -1211,6 +1235,8 @@ def main() -> None:
         log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
         log.info(" - rules_run          cron 15:45 Mon-Fri %s (rules-only account, no LLM)", TIMEZONE)
         log.info(" - rules_prepare      cron 06:30 Mon-Fri %s (rules-only account signals)", TIMEZONE)
+        log.info(" - spreads_scan       cron 10:00 Mon-Fri %s (condor/vertical limit orders, no LLM)", TIMEZONE)
+        log.info(" - spreads_eod        cron 16:10 Mon-Fri %s (carry/drop orders, settle, equity)", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

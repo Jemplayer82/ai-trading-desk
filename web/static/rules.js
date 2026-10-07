@@ -129,8 +129,79 @@ async function createRulesAccount() {
   loadRulesTab();
 }
 
+// ── Spread accounts (web/spread_engine.py): condors / credit verticals filled from live quotes ──
+
+function spreadLegs(legsJson) {
+  let legs = [];
+  try { legs = JSON.parse(legsJson); } catch (e) { return ""; }
+  return legs.map((l) => (l.side === "short" ? "-" : "+") + l.strike + (l.put_call === "PUT" ? "P" : "C")).join(" ");
+}
+
+function spreadAccountHtml(a) {
+  const acct = a.account;
+  const ret = 100 * (a.equity / acct.starting_capital - 1);
+  const open = a.positions.filter((p) => p.status === "open");
+  const closed = a.positions.filter((p) => p.status === "closed");
+  const working = a.orders.filter((o) => o.status === "working");
+  let h = "<div class=\"panel\"><div class=\"panel-title\">[ " + escapeHtml(acct.name) + " — " +
+    (acct.structure === "condor" ? "iron condors" : "credit verticals") + " ]</div>";
+  h += "<div style=\"display:flex;gap:28px;flex-wrap:wrap;margin-bottom:12px;\">" +
+    "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Account value</div>" + rulesMoney(a.equity) + " " + rulesPct(ret) + "</div>" +
+    "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Fill rate (orders done)</div>" + (a.fill_rate == null ? "—" : (100 * a.fill_rate).toFixed(0) + "%") + "</div>" +
+    "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Avg fill vs the midpoint</div>" + (a.avg_fill_vs_mid == null ? "—" : (a.avg_fill_vs_mid >= 0 ? "+" : "") + "$" + (100 * a.avg_fill_vs_mid).toFixed(0) + " a spread") + "</div>" +
+    "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Closed</div>" + a.closed + " (" + a.wins + " winners) " + rulesMoney(a.realized, true) + "</div>" +
+    "</div>";
+  const table = (title, rows, head, row) => {
+    if (!rows.length) return "<div class=\"dim\" style=\"font-size:11px;margin:8px 0;\">" + title + ": none</div>";
+    return "<div class=\"dim\" style=\"font-size:11px;margin:10px 0 6px;\">" + title + "</div><table class=\"spy-table\"><thead><tr>" +
+      head.map((x) => "<th>" + x + "</th>").join("") + "</tr></thead><tbody>" + rows.map(row).join("") + "</tbody></table>";
+  };
+  h += table("Working orders (limit waits for the market)", working, ["Stock", "Legs", "Expiry", "Qty", "Limit", "Started at mid", "Floor", "Days"],
+    (o) => "<tr><td>" + escapeHtml(o.ticker) + "</td><td>" + spreadLegs(o.legs) + "</td><td>" + rulesDate(o.expiration_date) + "</td><td>" + o.contracts +
+      "</td><td>$" + Number(o.limit_price).toFixed(2) + "</td><td>$" + Number(o.initial_mid).toFixed(2) + "</td><td>$" + Number(o.floor_price).toFixed(2) + "</td><td>" + o.trading_days + "</td></tr>");
+  h += table("Open spreads", open, ["Stock", "Legs", "Expiry", "Qty", "Credit", "Take profit at", "Cost to close now", "Max loss"],
+    (p) => "<tr><td>" + escapeHtml(p.ticker) + "</td><td>" + spreadLegs(p.legs) + "</td><td>" + rulesDate(p.expiration_date) + "</td><td>" + p.contracts +
+      "</td><td>$" + Number(p.credit).toFixed(2) + "</td><td>$" + Number(p.tp_price).toFixed(2) + "</td><td>" + (p.last_close_natural == null ? "—" : "$" + Number(p.last_close_natural).toFixed(2)) +
+      "</td><td>" + rulesMoney(p.max_loss) + "</td></tr>");
+  h += table("Closed spreads", closed.slice(0, 50), ["Stock", "Legs", "Opened", "Closed", "Why", "Credit", "Closed at", "Profit"],
+    (p) => "<tr><td>" + escapeHtml(p.ticker) + "</td><td>" + spreadLegs(p.legs) + "</td><td>" + rulesDate(p.opened_at) + "</td><td>" + rulesDate(p.closed_at) +
+      "</td><td>" + (p.close_reason === "profit_target" ? "40% of credit kept" : p.close_reason === "expiry" ? "expired" : escapeHtml(p.close_reason)) +
+      "</td><td>$" + Number(p.credit).toFixed(2) + "</td><td>$" + Number(p.close_price).toFixed(2) + "</td><td>" + rulesMoney(p.pnl, true) + "</td></tr>");
+  return h + "</div>";
+}
+
+async function loadSpreads() {
+  const box = document.getElementById("spreads-main");
+  if (!box) return;
+  try {
+    const data = await apiFetch("/api/options-spreads");
+    const accts = data.accounts || [];
+    box.innerHTML = accts.length ? accts.map(spreadAccountHtml).join("") : "<div class=\"panel\"><p class=\"dim\">No spread account yet.</p></div>";
+  } catch (e) {
+    box.innerHTML = "<div class=\"panel\"><p class=\"dim\">Could not load spread accounts: " + escapeHtml(e.message || String(e)) + "</p></div>";
+  }
+}
+
+async function createSpreadAccount() {
+  const name = (document.getElementById("spreads-new-name").value || "").trim();
+  const structure = document.getElementById("spreads-new-structure").value;
+  const capital = Number(document.getElementById("spreads-new-capital").value || 50000);
+  if (!name) { alert("Give the account a name."); return; }
+  try {
+    await apiFetch("/api/options-spreads/accounts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, structure, starting_capital: capital }),
+    });
+  } catch (e) {
+    alert(e.message || String(e));
+    return;
+  }
+  loadSpreads();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("btn-spreads-create")?.addEventListener("click", createSpreadAccount);
   document.getElementById("btn-rules-create")?.addEventListener("click", createRulesAccount);
-  document.getElementById("btn-rules-reload")?.addEventListener("click", loadRulesTab);
+  document.getElementById("btn-rules-reload")?.addEventListener("click", () => { loadRulesTab(); loadSpreads(); });
 });
-document.addEventListener("tab-shown", (e) => { if (e.detail === "rules") loadRulesTab(); });
+document.addEventListener("tab-shown", (e) => { if (e.detail === "rules") { loadRulesTab(); loadSpreads(); } });

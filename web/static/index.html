@@ -513,6 +513,17 @@
         </div>
       </div>
       <div id="rules-main"></div>
+      <div class="panel">
+        <div class="panel-title">[ Spread Accounts — condors / verticals, no AI ]</div>
+        <p class="dim" style="margin:0 0 10px;">Sells iron condors or credit spreads when the chance of max profit is at least 55% and max profit is at least 1.5&times; the max loss (Friday expiries up to 45 days, no earnings before expiry). Orders are limits at the midpoint that fill ONLY when the live Schwab market reaches the price (checked every few seconds); an unfilled limit steps 1&cent; toward the market every 10 minutes, never below 1.5&times; reward/risk, and is dropped after 3 days. Take profit at 40% of the credit, no stop, 5% of the account at risk per spread. Scans at 10:00 AM ET. 100% simulated.</p>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <input type="text" id="spreads-new-name" placeholder="Account name" value="Condors" style="width:200px;">
+          <select id="spreads-new-structure" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="condor">Iron condors</option><option value="vertical">Credit verticals</option></select>
+          <input type="number" id="spreads-new-capital" value="50000" min="1000" step="1000" style="width:120px;">
+          <button id="btn-spreads-create" type="button" class="ghost">Create spread account</button>
+        </div>
+      </div>
+      <div id="spreads-main"></div>
     </section>
   </main>
   <!-- TIER:4 END -->
