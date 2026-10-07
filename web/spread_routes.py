@@ -39,8 +39,8 @@ def create_spread_account(body: dict[str, Any] | None = None) -> dict[str, Any]:
     structure = str(body.get("structure") or "condor")
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
-    if structure not in ("condor", "vertical"):
-        raise HTTPException(status_code=400, detail="structure must be 'condor' or 'vertical'")
+    if structure not in spread_engine.STRUCTURES:
+        raise HTTPException(status_code=400, detail="structure must be one of " + ", ".join(spread_engine.STRUCTURES))
     try:
         capital = float(body.get("starting_capital") or 50_000)
     except (TypeError, ValueError):

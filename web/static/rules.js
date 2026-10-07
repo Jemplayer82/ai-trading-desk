@@ -144,7 +144,7 @@ function spreadAccountHtml(a) {
   const closed = a.positions.filter((p) => p.status === "closed");
   const working = a.orders.filter((o) => o.status === "working");
   let h = "<div class=\"panel\"><div class=\"panel-title\">[ " + escapeHtml(acct.name) + " — " +
-    (acct.structure === "condor" ? "iron condors" : "credit verticals") + " ]</div>";
+    ({ condor: "iron condors", vertical: "credit verticals", rich_put: "rich-day put spreads" }[acct.structure] || escapeHtml(acct.structure)) + " ]</div>";
   h += "<div style=\"display:flex;gap:28px;flex-wrap:wrap;margin-bottom:12px;\">" +
     "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Account value</div>" + rulesMoney(a.equity) + " " + rulesPct(ret) + "</div>" +
     "<div><div class=\"dim\" style=\"font-size:10px;text-transform:uppercase;\">Fill rate (orders done)</div>" + (a.fill_rate == null ? "—" : (100 * a.fill_rate).toFixed(0) + "%") + "</div>" +
@@ -156,16 +156,18 @@ function spreadAccountHtml(a) {
     return "<div class=\"dim\" style=\"font-size:11px;margin:10px 0 6px;\">" + title + "</div><table class=\"spy-table\"><thead><tr>" +
       head.map((x) => "<th>" + x + "</th>").join("") + "</tr></thead><tbody>" + rows.map(row).join("") + "</tbody></table>";
   };
-  h += table("Working orders (limit waits for the market)", working, ["Stock", "Legs", "Expiry", "Qty", "Limit", "Started at mid", "Floor", "Days"],
+  const ivrv = (o) => { try { const s = JSON.parse(o.signal || "null"); return s ? s.ivrv.toFixed(2) : "—"; } catch (e) { return "—"; } };
+  h += table("Working orders (limit waits for the market)", working, ["Stock", "Legs", "Expiry", "Qty", "Limit", "Started at mid", "Floor", "Days", "IV/RV"],
     (o) => "<tr><td>" + escapeHtml(o.ticker) + "</td><td>" + spreadLegs(o.legs) + "</td><td>" + rulesDate(o.expiration_date) + "</td><td>" + o.contracts +
-      "</td><td>$" + Number(o.limit_price).toFixed(2) + "</td><td>$" + Number(o.initial_mid).toFixed(2) + "</td><td>$" + Number(o.floor_price).toFixed(2) + "</td><td>" + o.trading_days + "</td></tr>");
+      "</td><td>$" + Number(o.limit_price).toFixed(2) + "</td><td>$" + Number(o.initial_mid).toFixed(2) + "</td><td>$" + Number(o.floor_price).toFixed(2) + "</td><td>" + o.trading_days +
+      "</td><td>" + ivrv(o) + "</td></tr>");
   h += table("Open spreads", open, ["Stock", "Legs", "Expiry", "Qty", "Credit", "Take profit at", "Cost to close now", "Max loss"],
     (p) => "<tr><td>" + escapeHtml(p.ticker) + "</td><td>" + spreadLegs(p.legs) + "</td><td>" + rulesDate(p.expiration_date) + "</td><td>" + p.contracts +
       "</td><td>$" + Number(p.credit).toFixed(2) + "</td><td>$" + Number(p.tp_price).toFixed(2) + "</td><td>" + (p.last_close_natural == null ? "—" : "$" + Number(p.last_close_natural).toFixed(2)) +
       "</td><td>" + rulesMoney(p.max_loss) + "</td></tr>");
   h += table("Closed spreads", closed.slice(0, 50), ["Stock", "Legs", "Opened", "Closed", "Why", "Credit", "Closed at", "Profit"],
     (p) => "<tr><td>" + escapeHtml(p.ticker) + "</td><td>" + spreadLegs(p.legs) + "</td><td>" + rulesDate(p.opened_at) + "</td><td>" + rulesDate(p.closed_at) +
-      "</td><td>" + (p.close_reason === "profit_target" ? "40% of credit kept" : p.close_reason === "expiry" ? "expired" : escapeHtml(p.close_reason)) +
+      "</td><td>" + (p.close_reason === "profit_target" ? "profit target" : p.close_reason === "expiry" ? "expired" : escapeHtml(p.close_reason)) +
       "</td><td>$" + Number(p.credit).toFixed(2) + "</td><td>$" + Number(p.close_price).toFixed(2) + "</td><td>" + rulesMoney(p.pnl, true) + "</td></tr>");
   return h + "</div>";
 }

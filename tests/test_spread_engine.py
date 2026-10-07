@@ -1,5 +1,6 @@
 """Rules-only credit-spread accounts (web/spread_engine.py): scan rule, live-quote touch fills,
 walking limits, take-profit, expiry settlement, sizing caps. Fake feeds only (no network, no LLM)."""
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -92,7 +93,7 @@ class Feeds:
         self.q, self.chains = {}, {}
 
     def as_feeds(self, universe=("XYZ",)):
-        return se.Feeds(universe=lambda: list(universe), chain=lambda t, d: self.chains.get(t),
+        return se.Feeds(universe=lambda: list(universe), chain=lambda t, d, *a: self.chains.get(t),
                         raw_quotes=lambda syms: {s: self.q[s] for s in syms if s in self.q},
                         earnings_dates=lambda t: [])
 
@@ -247,3 +248,85 @@ def test_wings_capped_at_five_dollars():
     puts = [_contract("P99", "PUT", 99, 0.70, 0.74, iv=10), _contract("P92", "PUT", 92, 0.0, 0.02, iv=10)]
     spot, cs = se.parse_chain(_payload(100, puts, []), REF)
     assert se.scan(cs, spot, "vertical") is None      # only a $7-wide spread exists: too wide
+
+
+# ── rich-day put spreads ──
+
+def _rich_payload(spot=100.0, near_iv=40.0, far_iv=38.0, short_bid=0.90, short_ask=0.95, long_bid=0.30, long_ask=0.34):
+    near, far = "2026-11-20", "2026-12-24"       # 44 and 78 days from REF
+    def c(sym, side, k, bid, ask, iv):
+        return {"symbol": sym, "putCall": side, "strikePrice": k, "bid": bid, "ask": ask, "volatility": iv}
+    puts_near = {str(k): [c(f"P{k}", "PUT", k, b, a, near_iv)] for k, b, a in
+                 ((100, 4.0, 4.1), (95, 2.0, 2.05), (90, short_bid, short_ask), (88, 0.6, 0.64), (85, long_bid, long_ask))}
+    calls_near = {str(k): [c(f"C{k}", "CALL", k, 4.0, 4.1, near_iv)] for k in (100, 101)}
+    puts_far = {"100": [c("PF100", "PUT", 100, 5.0, 5.1, far_iv)], "99": [c("PF99", "PUT", 99, 4.6, 4.7, far_iv)]}
+    calls_far = {"100": [c("CF100", "CALL", 100, 5.0, 5.1, far_iv)], "101": [c("CF101", "CALL", 101, 4.6, 4.7, far_iv)]}
+    return {"underlyingPrice": spot,
+            "putExpDateMap": {f"{near}:44": puts_near, f"{far}:78": puts_far},
+            "callExpDateMap": {f"{near}:44": calls_near, f"{far}:78": calls_far}}
+
+
+def _calm_closes(vol=0.20):
+    import math
+    d, px, out = REF - timedelta(days=60), 100.0, {}
+    step = vol / math.sqrt(252)
+    k = 0
+    while d < REF:
+        if d.weekday() < 5:
+            px *= math.exp(step if k % 2 else -step)
+            out[d] = px
+            k += 1
+        d += timedelta(days=1)
+    return out
+
+
+def test_rich_put_scan_picks_075_sd_short_and_capped_wing():
+    spot, cs = se.parse_chain(_rich_payload(), REF)
+    pick = se.scan_rich_put(cs, spot, _calm_closes(0.20))     # IV 40% vs realized 20% -> IV/RV 2.0; far 38% < near: inverted
+    assert pick is not None
+    # SD = 100 x 0.40 x sqrt(44/365) = 13.9: short nearest 100 - 0.75 SD = 89.6 -> 90; wing min(0.5 SD, $5) = $5 -> 85
+    assert [l["strike"] for l in pick["legs"]] == [90.0, 85.0] and pick["width"] == 5.0
+    assert pick["mid"] == pytest.approx(0.605) and pick["natural"] == pytest.approx(0.56)
+    assert pick["signal"]["ivrv"] >= 1.33 and pick["signal"]["term"] <= 0.012
+
+
+def test_rich_put_skips_wide_markets():
+    spot, cs = se.parse_chain(_rich_payload(short_bid=0.60, short_ask=1.20), REF)   # natural 0.26 vs mid 0.58: > 25% below
+    assert se.scan_rich_put(cs, spot, _calm_closes(0.20)) is None
+
+
+def test_rich_put_needs_rich_and_inverted():
+    spot, cs = se.parse_chain(_rich_payload(near_iv=20.0, far_iv=19.0), REF)
+    assert se.scan_rich_put(cs, spot, _calm_closes(0.20)) is None          # IV/RV 1.0: not rich
+    spot, cs = se.parse_chain(_rich_payload(near_iv=40.0, far_iv=45.0), REF)
+    assert se.scan_rich_put(cs, spot, _calm_closes(0.20)) is None          # term upward sloping: not inverted
+    spot, cs = se.parse_chain(_rich_payload(), REF)
+    assert se.scan_rich_put(cs, spot, {}) is None                          # no price history: no trade
+
+
+def test_rich_put_floor_tp_and_full_budget(tmp_db):
+    assert se.floor_for("rich_put", 0.60, 0.52, 3) == pytest.approx(0.58)  # 25% of the way from mid to natural
+    assert se.floor_for("vertical", 0.60, 0.52, 1) == 0.6                  # reward/risk 1.5 rule
+    assert se.STRUCTURES["rich_put"]["tp_keep"] == 0.50 and se.STRUCTURES["rich_put"]["risk_total"] == 1.00
+    se.create_account("Rich puts", "rich_put", 20_000)
+    with pytest.raises(ValueError):
+        se.create_account("bad", "straddle", 20_000)
+
+
+def test_rich_put_end_to_end_order_floor_and_tp(tmp_db):
+    f = Feeds()
+    se.create_account("Rich puts", "rich_put", 20_000)
+    f.chains["XYZ"] = _rich_payload()
+    feeds = f.as_feeds()
+    feeds.daily_closes = lambda t: _calm_closes(0.20)
+    out = se.run_scan(feeds, REF)
+    assert out["accounts"]["Rich puts"]["placed"] == 1
+    (o,) = _rows("SELECT * FROM spread_orders")
+    assert o["structure"] == "rich_put" and o["limit_price"] == pytest.approx(0.6, abs=0.01)
+    assert o["floor_price"] == pytest.approx(round(o["limit_price"] - 0.25 * (o["limit_price"] - 0.56), 2))
+    assert json.loads(o["signal"])["ivrv"] >= 1.33 and o["contracts"] == 1      # $500 cap: one $5-wide spread
+    now = datetime(2026, 10, 8, 15, tzinfo=timezone.utc)
+    f.q = {"P90": _q(0.95, 0.97, now), "P85": _q(0.30, 0.32, now)}            # natural 0.63 >= limit -> fill
+    assert se.poll_once(f.as_feeds(), now)["filled"] == 1
+    (p,) = _rows("SELECT * FROM spread_positions")
+    assert p["tp_price"] == pytest.approx(round(0.5 * p["credit"], 2))           # 50% kept

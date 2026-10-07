@@ -6,7 +6,14 @@ version that just does verticals". The strategy-lab backtest (2016-2026, real cl
 this rule profitable ONLY when fills land at/near the midpoint, so this account exists to measure
 real fill quality and real P&L. No LLM anywhere; paper only (no order tools exist on this path).
 
-Rule (each account has a `structure`: 'condor' or 'vertical'):
+Rule (each account has a `structure`: 'condor', 'vertical' or 'rich_put'):
+- 'rich_put' (strategy-lab "rich-day put spreads", 10/07/2026): trade only when the options look
+  rich - ATM IV / 20-day realized vol >= 1.33 AND the 70-100-day ATM IV minus the 30-45-day ATM IV
+  <= 0.012 (inverted). Sell the put nearest 0.75 SD below the price (expiry 30-45 days, closest to
+  45), buy the put nearest 0.5 SD lower but at most $5 lower; natural credit > 0 and no more than 25%
+  below the mid; richest first. The limit never walks more than 25% of the way from mid to natural.
+  Take profit at 50% kept, else expire; up to 100% of equity at risk. The rest below is shared.
+
 - Scan (10:00 ET trading days): S&P 500 + a liquid ETF list; Friday expiries 3-45 days out; Schwab
   chain per ticker. Condor = OTM short put + OTM short call with equal-width wings; vertical = an
   OTM credit put spread or credit call spread. P(max profit) from each short strike's own implied
@@ -57,6 +64,19 @@ RISK_PER, RISK_TOTAL, RISK_PER_TICKER = 0.05, 0.50, 0.10
 # at most $500 of max loss per spread (whole contracts), with more spreads open at once.
 MAX_WIDTH, MAX_LOSS_PER_SPREAD = 5.0, 500.0
 MAX_NEW_PER_DAY = 20
+# Per account type. 'rich_put' = the strategy-lab "rich-day put spread" (10/07/2026): take profit at
+# 50% kept (closing 2 weeks early tested worse), up to 100% of equity at risk ("use all the money").
+STRUCTURES = {
+    "condor": {"tp_keep": TP_KEEP, "risk_total": RISK_TOTAL},
+    "vertical": {"tp_keep": TP_KEEP, "risk_total": RISK_TOTAL},
+    "rich_put": {"tp_keep": 0.50, "risk_total": 1.00},
+}
+RICH_IVRV, RICH_TERM = 1.33, 0.012          # top 20% IV/RV and inverted near-term IV (cuts from 2009-17)
+RICH_SHORT_SD, RICH_WING_SD = 0.75, 0.50
+RICH_DTE_LO, RICH_DTE_HI, RICH_DTE_AIM = 30, 45, 45
+RICH_FAR_LO, RICH_FAR_HI = 70, 100
+RICH_MAX_GAP = 0.25        # skip if the natural credit is > 25% below the mid
+RICH_FLOOR_SHARE = 0.25    # the limit never walks more than 25% of the way from mid to natural
 ENTRY_DAYS = 3
 WALK_EVERY_S, WALK_STEP = 600, 0.01
 MAX_GAP_SHARE = 0.50   # liquidity: skip a spread whose natural credit is <= 0 or > 50% below its mid
@@ -102,6 +122,7 @@ CREATE TABLE IF NOT EXISTS spread_orders (
     fill_price REAL,
     fill_mid REAL,
     fill_natural REAL,
+    signal TEXT,
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_spread_orders_status ON spread_orders (status);
@@ -273,6 +294,69 @@ def scan(contracts: list[dict[str, Any]], spot: float, structure: str) -> dict[s
     return best
 
 
+def _atm_iv(cs: list[dict[str, Any]], spot: float) -> float | None:
+    near = sorted(cs, key=lambda c: abs(c["strike"] - spot))[:4]
+    ivs = [c["iv"] for c in near if 0.01 < c["iv"] < 5]
+    return sum(ivs) / len(ivs) if ivs else None
+
+
+def realized_vol(closes: dict[date, float], days: int = 20) -> float | None:
+    px = [closes[d] for d in sorted(closes)][-(days + 1):]
+    if len(px) < days + 1:
+        return None
+    rets = [math.log(b / a) for a, b in zip(px, px[1:], strict=False) if a > 0 and b > 0]
+    if len(rets) < days:
+        return None
+    m = sum(rets) / len(rets)
+    return math.sqrt(sum((r - m) ** 2 for r in rets) / (len(rets) - 1)) * math.sqrt(252)
+
+
+def scan_rich_put(contracts: list[dict[str, Any]], spot: float, closes: dict[date, float]) -> dict[str, Any] | None:
+    """Rich-day put credit spread, or None. Rich = ATM IV / 20-day realized vol >= 1.33 AND far-month
+    ATM IV - near ATM IV <= 0.012. Short put nearest price - 0.75 SD, long put nearest short -
+    min(0.5 SD, $5) (at most $5 lower); natural credit > 0 and <= 25% below the mid."""
+    by_dte: dict[int, list] = {}
+    for c in contracts:
+        by_dte.setdefault(c["dte"], []).append(c)
+    near = [d for d in by_dte if RICH_DTE_LO <= d <= RICH_DTE_HI]
+    far = sorted(d for d in by_dte if RICH_FAR_LO <= d <= RICH_FAR_HI)
+    if not near or not far:
+        return None
+    dte = min(near, key=lambda d: (abs(d - RICH_DTE_AIM), d))
+    iv, iv_far, rv = _atm_iv(by_dte[dte], spot), _atm_iv(by_dte[far[0]], spot), realized_vol(closes)
+    if not iv or not iv_far or not rv:
+        return None
+    ivrv, term = iv / rv, iv_far - iv
+    if ivrv < RICH_IVRV or term > RICH_TERM:
+        return None
+    sd = spot * iv * math.sqrt(dte / 365)
+    puts = [c for c in by_dte[dte] if c["put_call"] == "PUT"]
+    shorts = [c for c in puts if c["strike"] < spot and c["bid"] > 0]
+    if not shorts:
+        return None
+    sp = min(shorts, key=lambda c: abs(c["strike"] - (spot - RICH_SHORT_SD * sd)))
+    longs = [c for c in puts if sp["strike"] - MAX_WIDTH - 1e-9 <= c["strike"] < sp["strike"]]
+    if not longs:
+        return None
+    lp = min(longs, key=lambda c: abs(c["strike"] - (sp["strike"] - min(RICH_WING_SD * sd, MAX_WIDTH))))
+    width = sp["strike"] - lp["strike"]
+    mid, natural = sp["mid"] - lp["mid"], sp["bid"] - lp["ask"]
+    if not (0 < mid < width) or natural <= 0 or (mid - natural) > RICH_MAX_GAP * mid:
+        return None
+    return {"legs": [{"side": "short", "symbol": sp["symbol"], "put_call": "PUT", "strike": sp["strike"]},
+                     {"side": "long", "symbol": lp["symbol"], "put_call": "PUT", "strike": lp["strike"]}],
+            "expiration_date": sp["expiration_date"], "dte": dte, "width": width, "mid": mid, "natural": natural,
+            "pmax": p_above(spot, sp["strike"], sp["iv"], dte), "model_ev": ivrv,
+            "signal": {"iv": round(iv, 4), "rv20": round(rv, 4), "ivrv": round(ivrv, 3), "term": round(term, 4),
+                       "sd": round(sd, 2), "spot": spot}}
+
+
+def floor_for(structure: str, mid: float, natural: float | None, width: float) -> float:
+    if structure == "rich_put" and natural is not None:
+        return round(mid - RICH_FLOOR_SHARE * (mid - natural), 2)
+    return floor_price(width)
+
+
 def floor_price(width: float) -> float:
     """Lowest credit that still keeps reward/risk >= 1.5: credit / (width - credit) >= 1.5."""
     return round(RR_MIN * width / (1 + RR_MIN), 2)
@@ -369,16 +453,17 @@ def intrinsic(legs: list[dict], spot: float) -> float:
 @dataclass
 class Feeds:
     universe: Callable[[], list[str]]
-    chain: Callable[[str, date], dict[str, Any] | None]
+    chain: Callable[..., dict[str, Any] | None]          # (ticker, ref_date, max_dte)
     raw_quotes: Callable[[list[str]], dict[str, Any]]
     earnings_dates: Callable[[str], list[date]]
+    daily_closes: Callable[[str], dict[date, float]] | None = None   # completed sessions, for rich_put
 
 
-def _schwab_chain(ticker: str, ref: date) -> dict[str, Any] | None:
+def _schwab_chain(ticker: str, ref: date, max_dte: int = DTE_MAX) -> dict[str, Any] | None:
     from tradingagents.dataflows import schwab_mcp
     return schwab_mcp.get_option_chain(ticker, contract_type="ALL", strike_count=STRIKE_COUNT,
                                        from_date=(ref + timedelta(days=DTE_MIN)).isoformat(),
-                                       to_date=(ref + timedelta(days=DTE_MAX)).isoformat())
+                                       to_date=(ref + timedelta(days=max_dte)).isoformat())
 
 
 def _schwab_quotes(symbols: list[str]) -> dict[str, Any]:
@@ -432,14 +517,16 @@ def _earnings_dates(ticker: str) -> list[date]:
 
 
 def default_feeds() -> Feeds:
-    return Feeds(universe=_universe, chain=_schwab_chain, raw_quotes=_schwab_quotes, earnings_dates=_earnings_dates)
+    from .rules_engine import _schwab_closes
+    return Feeds(universe=_universe, chain=_schwab_chain, raw_quotes=_schwab_quotes, earnings_dates=_earnings_dates,
+                 daily_closes=_schwab_closes)
 
 
 # ── accounts and equity ──────────────────────────────────────────────────────
 
 def create_account(name: str, structure: str, capital: float = 50_000.0) -> int:
-    if structure not in ("condor", "vertical"):
-        raise ValueError("structure must be 'condor' or 'vertical'")
+    if structure not in STRUCTURES:
+        raise ValueError("structure must be one of " + ", ".join(STRUCTURES))
     init_tables()
     with db.connect() as conn:
         return int(conn.execute(
@@ -492,12 +579,13 @@ def run_scan(feeds: Feeds | None = None, today: date | None = None) -> dict[str,
     run_id, out = None, {"accounts": {}, "errors": []}
     try:
         run_id = _log_run("scan")
-        found: dict[str, dict[str, dict]] = {"condor": {}, "vertical": {}}
         structures = {a["structure"] for a in accounts}
+        found: dict[str, dict[str, dict]] = {s: {} for s in STRUCTURES}
+        max_dte = RICH_FAR_HI if "rich_put" in structures else DTE_MAX
         feeds.earnings_dates("SPY")      # load the calendar once; raises (no orders) if unavailable
 
         def one(t: str):
-            payload = feeds.chain(t, today)
+            payload = feeds.chain(t, today, max_dte)
             if not payload:
                 return t, {}
             spot, contracts = parse_chain(payload, today)
@@ -505,7 +593,11 @@ def run_scan(feeds: Feeds | None = None, today: date | None = None) -> dict[str,
                 return t, {}
             picks = {}
             for s in structures:
-                pick = scan(contracts, spot, s)
+                if s == "rich_put":
+                    closes = feeds.daily_closes(t) if feeds.daily_closes else {}
+                    pick = scan_rich_put(contracts, spot, closes)
+                else:
+                    pick = scan(contracts, spot, s)
                 if pick is None:
                     continue
                 exp = date.fromisoformat(pick["expiration_date"])
@@ -571,7 +663,7 @@ def _place(acct: dict[str, Any], cands: list[dict[str, Any]]) -> dict[str, Any]:
                     skipped["too_small"] = skipped.get("too_small", 0) + 1
                     continue
                 add = max_loss_per(c["width"], limit, n_legs) * n
-                if risk + add > RISK_TOTAL * equity:
+                if risk + add > STRUCTURES[acct["structure"]]["risk_total"] * equity:
                     skipped["total_risk"] = skipped.get("total_risk", 0) + 1
                     continue
                 if per_ticker.get(c["ticker"], 0) + add > RISK_PER_TICKER * equity:
@@ -579,9 +671,11 @@ def _place(acct: dict[str, Any], cands: list[dict[str, Any]]) -> dict[str, Any]:
                     continue
                 conn.execute(
                     "INSERT INTO spread_orders (account_id, ticker, structure, legs, expiration_date, width, contracts, pmax, model_ev, "
-                    "initial_mid, initial_natural, limit_price, floor_price, placed_at, last_walk_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "initial_mid, initial_natural, limit_price, floor_price, placed_at, last_walk_at, signal) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (acct["id"], c["ticker"], acct["structure"], json.dumps(c["legs"]), c["expiration_date"], c["width"], n,
-                     c["pmax"], c["model_ev"], c["mid"], c.get("natural"), limit, floor_price(c["width"]), _now(), _now()))
+                     c["pmax"], c["model_ev"], c["mid"], c.get("natural"), limit,
+                     floor_for(acct["structure"], limit, c.get("natural"), c["width"]), _now(), _now(),
+                     json.dumps(c.get("signal")) if c.get("signal") else None))
                 risk += add
                 per_ticker[c["ticker"]] = per_ticker.get(c["ticker"], 0) + add
                 placed += 1
@@ -674,7 +768,8 @@ def _fill(o: dict[str, Any], price: float, mid: float, nat: float, now: datetime
                     "INSERT INTO spread_positions (account_id, order_id, ticker, structure, legs, expiration_date, width, contracts, credit, "
                     "max_loss, tp_price, opened_at, last_close_natural) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (o["account_id"], o["id"], o["ticker"], o["structure"], o["legs"], o["expiration_date"], o["width"], o["contracts"],
-                     price, max_loss_per(o["width"], price, n_legs) * o["contracts"], round((1 - TP_KEEP) * price, 2),
+                     price, max_loss_per(o["width"], price, n_legs) * o["contracts"],
+                     round((1 - STRUCTURES.get(o["structure"], {"tp_keep": TP_KEEP})["tp_keep"]) * price, 2),
                      now.isoformat(timespec="seconds"), price))
                 conn.execute("UPDATE spread_accounts SET cash = cash + ? WHERE id = ?",
                              (price * 100 * o["contracts"] - COMMISSION * n_legs * o["contracts"], o["account_id"]))
