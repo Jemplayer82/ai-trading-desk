@@ -228,3 +228,14 @@ def test_short_leg_needs_a_bid():
     puts = [_contract("P99", "PUT", 99, 0.0, 0.74, iv=10), _contract("P98", "PUT", 98, 0.0, 0.12, iv=10)]
     spot, cs = se.parse_chain(_payload(100, puts, []), REF)
     assert se.scan(cs, spot, "vertical") is None
+
+
+def test_fill_needs_fresh_sold_legs(tmp_db):
+    f = Feeds()
+    aid, o = _setup_order(tmp_db, f)
+    now = datetime(2026, 10, 7, 15, tzinfo=timezone.utc)
+    old = now - timedelta(seconds=se.SHORT_FRESH_S + 5)
+    f.q = {"P99": _q(0.74, 0.78, old), "P98": _q(0.10, 0.12, now)}   # touch, but the sold leg's quote is old
+    assert se.poll_once(f.as_feeds(), now)["filled"] == 0
+    f.q = {"P99": _q(0.74, 0.78, now), "P98": _q(0.10, 0.12, old)}   # quiet bought wing is fine
+    assert se.poll_once(f.as_feeds(), now)["filled"] == 1

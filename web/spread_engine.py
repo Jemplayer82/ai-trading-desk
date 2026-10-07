@@ -59,6 +59,7 @@ POLL_S = 3.0
 # Schwab's quoteTime only advances when a quote CHANGES, so a quiet far-OTM wing can show an old
 # stamp while still being the live market. A returned quote counts unless it is older than this.
 STALE_S = 900.0
+SHORT_FRESH_S = 60.0   # but a fill / take-profit needs the SOLD legs (near the money, active) fresh
 STRIKE_COUNT = 40
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "XLE", "XOP", "XLF", "SMH", "EEM", "GDX", "XBI", "KRE"]
 
@@ -309,6 +310,10 @@ def validate(raw: Any, now: float) -> Quote | None:
     return Quote(bid, ask, stamp)
 
 
+def shorts_fresh(legs: list[dict], quotes: dict[str, Quote], now: float) -> bool:
+    return all(now - quotes[l["symbol"]].stamp <= SHORT_FRESH_S for l in legs if l["side"] == "short" and l["symbol"] in quotes)
+
+
 def open_natural(legs: list[dict], quotes: dict[str, Quote]) -> float | None:
     if any(l["symbol"] not in quotes for l in legs):
         return None
@@ -334,6 +339,9 @@ def walked_limit(limit: float, floor: float) -> float:
 def regular_close(q: dict[str, Any]) -> float | None:
     """Regular-session (4:00 PM) price from a Schwab equity quote: last price minus any after-hours
     change (options settle on the regular close, not extended-hours prints)."""
+    reg = _num(q.get("regularMarketLastPrice"))
+    if reg is not None:
+        return reg
     last = _num(q.get("lastPrice"))
     if last is None:
         return None
@@ -409,7 +417,8 @@ def _earnings_dates(ticker: str) -> list[date]:
                             continue
             except Exception:
                 log.exception("[spreads] earnings calendar failed")
-            _CAL["dates"], _CAL["day"] = dates, today
+            _CAL["dates"] = dates
+            _CAL["day"] = today if dates is not None else None   # a failed fetch is retried next call
         if _CAL["dates"] is None:
             raise RuntimeError("earnings calendar unavailable today; no new spreads placed")
         return _CAL["dates"].get(ticker, [])
@@ -619,7 +628,7 @@ def poll_once(feeds: Feeds, now: datetime | None = None) -> dict[str, int]:
         limit = o["limit_price"]
         if o["reprice"]:
             limit = max(round(mid, 2), o["floor_price"])
-        if nat >= limit:
+        if nat >= limit and shorts_fresh(legs, quotes, stamp):
             _fill(o, limit, mid, nat, now)
             report["filled"] += 1
             continue
@@ -636,7 +645,7 @@ def poll_once(feeds: Feeds, now: datetime | None = None) -> dict[str, int]:
         if nat is None:
             report["unquoted"] += 1
             continue
-        if nat <= p["tp_price"]:
+        if nat <= p["tp_price"] and shorts_fresh(legs, quotes, stamp):
             _close(p, p["tp_price"], "profit_target", now)
             report["closed"] += 1
             continue
