@@ -188,3 +188,13 @@ def test_no_llm_or_order_tools_imported():
     src = inspect.getsource(se)
     for banned in ("llm", "placeOrder", "replaceOrder", "anthropic", "openai"):
         assert banned not in src.replace("No LLM", "").replace("no LLM", "")
+
+
+def test_too_wide_a_market_is_skipped():
+    # same rich mid as the passing case, but the natural credit is negative: not a real price
+    puts = [_contract("P99", "PUT", 99, 0.40, 1.04, iv=10), _contract("P98", "PUT", 98, 0.0, 0.22, iv=10)]
+    spot, cs = se.parse_chain(_payload(100, puts, []), REF)
+    assert [c for c in cs if c["symbol"] == "P98"] == []          # zero-bid long leg is dropped at parse
+    puts = [_contract("P99", "PUT", 99, 0.40, 1.04, iv=10), _contract("P98", "PUT", 98, 0.01, 0.19, iv=10)]
+    spot, cs = se.parse_chain(_payload(100, puts, []), REF)
+    assert se.scan(cs, spot, "vertical") is None                  # mid 0.62 but natural 0.21: > 50% below

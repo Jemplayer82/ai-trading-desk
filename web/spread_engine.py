@@ -12,7 +12,9 @@ Rule (each account has a `structure`: 'condor' or 'vertical'):
   OTM credit put spread or credit call spread. P(max profit) from each short strike's own implied
   volatility (lognormal N(d2)): condor = P(between the shorts), put spread = P(above the short put),
   call spread = P(below the short call). Keep P >= 55% AND mid credit / (width - mid credit) >= 1.5.
-  No earnings report before expiry. Best candidate per ticker by the model's expected value; up to
+  Liquidity: skip a spread whose natural credit is <= 0 or more than 50% below its mid (a mid that
+  wide is not a real price). No earnings report before expiry. Best candidate per ticker by the
+  model's expected value; up to
   MAX_NEW_PER_DAY new orders a day, best first.
 - Size: max loss per spread <= 5% of account equity (whole contracts); all open + working max loss
   <= 50% of equity; <= 10% of equity per underlying (several spreads per stock allowed).
@@ -52,6 +54,7 @@ RISK_PER, RISK_TOTAL, RISK_PER_TICKER = 0.05, 0.50, 0.10
 MAX_NEW_PER_DAY = 10
 ENTRY_DAYS = 3
 WALK_EVERY_S, WALK_STEP = 600, 0.01
+MAX_GAP_SHARE = 0.50   # liquidity: skip a spread whose natural credit is <= 0 or > 50% below its mid
 POLL_S, STALE_S = 3.0, 20.0
 STRIKE_COUNT = 40
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "XLE", "XOP", "XLF", "SMH", "EEM", "GDX", "XBI", "KRE"]
@@ -238,12 +241,15 @@ def scan(contracts: list[dict[str, Any]], spot: float, structure: str) -> dict[s
             for legs, credit, p in cands:
                 if not (0 < credit < w) or p < P_MIN or credit / (w - credit) < RR_MIN:
                     continue
+                natural = sum(c["bid"] if s == "short" else -c["ask"] for s, c in legs)
+                if natural <= 0 or credit - natural > MAX_GAP_SHARE * credit:
+                    continue    # too wide a market: the mid is not a real price
                 ev = _ev(p, credit, w)
                 if best is None or ev > best["model_ev"]:
                     best = {"legs": [{"side": s, "symbol": c["symbol"], "put_call": c["put_call"], "strike": c["strike"]}
                                      for s, c in legs],
                             "expiration_date": exp, "dte": dte, "width": w, "mid": credit, "pmax": p, "model_ev": ev,
-                            "natural": sum(c["bid"] if s == "short" else -c["ask"] for s, c in legs)}
+                            "natural": natural}
     return best
 
 
