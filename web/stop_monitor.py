@@ -23,6 +23,12 @@ from . import account_policy, db, market_calendar
 
 log = logging.getLogger(__name__)
 INTERVAL = 2.0
+MIN_GAP = 1.0  # hard floor between two polls; main() paces the 2 s cadence
+
+
+def iso_z(moment):
+    """The desk's UTC timestamp form (…Z), same as every other options_positions timestamp."""
+    return moment.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
 
 @dataclass(frozen=True)
@@ -92,6 +98,7 @@ class StopMonitor:
         self.kill_file = Path(kill_file) if kill_file else db.DB_PATH.parent / 'stop-monitor.kill'
         self.heartbeat_file = Path(heartbeat_file) if heartbeat_file else db.DB_PATH.parent / 'stop-monitor.heartbeat.json'
         self.failures = 0
+        self.alerted = False
         self.last_call = None
         # Dry-run state remains in memory: no position, policy, ledger or audit writes.
         self.shadow = {}
@@ -157,7 +164,7 @@ class StopMonitor:
             policy, peak, outcome = evaluated
             self.shadow[pos['id']] = dict(peak_premium=peak,
                 stop_level_hwm=max(number(pos.get('stop_level_hwm')) or 0, outcome.level) if policy.stop_type == 'trailing_staged' else pos.get('stop_level_hwm'),
-                stop_triggered_at=pos.get('stop_triggered_at') or (now.isoformat() if outcome.action == 'arm' else None))
+                stop_triggered_at=pos.get('stop_triggered_at') or (iso_z(now) if outcome.action == 'arm' else None))
             if outcome.action == 'fill':
                 self.simulated_closed.add(pos['id'])
                 return 'would_close'
@@ -185,16 +192,16 @@ class StopMonitor:
                          "current_premium=?, current_value=?, current_bid=?, current_ask=?, current_mid=?, "
                          "last_marked_at=?, price_source='realtime_bid', stale_count=0 WHERE id=? AND status='open'",
                          (peak, max(number(row.get('stop_level_hwm')) or 0, outcome.level) if policy.stop_type == 'trailing_staged' else row.get('stop_level_hwm'),
-                          row.get('stop_triggered_at') or (now.isoformat() if outcome.action == 'arm' else None),
+                          row.get('stop_triggered_at') or (iso_z(now) if outcome.action == 'arm' else None),
                           round(quote.bid, 4), round(quote.bid * 100 * int(row['contracts']), 2), quote.bid, quote.ask,
                           round((quote.bid + quote.ask) / 2, 4),
                           datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'), row['id']))
             if outcome.action == 'fill':
                 ok = db.close_options_position(row['id'], quote.bid, outcome.exit_reason,
-                    closed_at=now.isoformat(), exit_bid=quote.bid, exit_ask=quote.ask, transaction=conn)
+                    closed_at=iso_z(now), exit_bid=quote.bid, exit_ask=quote.ask, transaction=conn)
                 if ok:
                     conn.execute('INSERT INTO stop_monitor_audit VALUES (?,?,?,?,?,?,?,?,?,?)',
-                        (row['id'], now.isoformat(), quote.timestamp, quote.bid, quote.ask, latency,
+                        (row['id'], iso_z(now), quote.timestamp, quote.bid, quote.ask, latency,
                          json.dumps(asdict(policy), sort_keys=True), peak, outcome.level, outcome.exit_reason))
                 conn.commit()
                 if ok and self.notify:
@@ -222,10 +229,10 @@ class StopMonitor:
             quotes = {}
             for start in range(0, len(symbols), 100):
                 tick = time.monotonic()
-                if self.last_call is not None and tick - self.last_call < INTERVAL:
-                    if start == 0:
-                        report['rate_limited'] = True
-                        return report
+                if self.last_call is not None and start == 0 and tick - self.last_call < MIN_GAP:
+                    report['rate_limited'] = True
+                    return report
+                if self.last_call is not None and start > 0 and tick - self.last_call < INTERVAL:
                     time.sleep(INTERVAL - (tick - self.last_call))
                 if self.kill_file.exists():
                     report['killed'] = True
@@ -258,12 +265,26 @@ class StopMonitor:
                     report[action] += 1
                 elif action not in ('hold', 'already_closed'):
                     exclusions[action] += 1
-            report['failed'] = bool(exclusions)
-            self.failures = self.failures + 1 if report['failed'] else 0
-            if self.failures == 3 and not self.dry_run:
+            # Only a data-feed outage counts toward the alert: per-contract exclusions (a 0.00 bid on a
+            # deep-OTM option, a stale quote after an early close) are normal and are reported, not alerted.
+            outage = bool(exclusions.get('api_error')) or bool(symbols and not quotes)
+            report['failed'] = outage
+            if outage:
+                self.failures += 1
+            else:
+                if self.alerted and not self.dry_run:
+                    with db.connect() as conn:
+                        conn.execute('INSERT INTO stop_monitor_alerts(ts,failures,reason) VALUES (?,?,?)',
+                                     (iso_z(received), 0, json.dumps({'recovered_after_failures': self.failures})))
+                    if self.notify:
+                        self.notify('Paper stop monitor recovered', 'Quotes are flowing again.')
+                self.failures = 0
+                self.alerted = False
+            if self.failures >= 3 and not self.alerted and not self.dry_run:
+                self.alerted = True
                 with db.connect() as conn:
                     conn.execute('INSERT INTO stop_monitor_alerts(ts,failures,reason) VALUES (?,?,?)',
-                                 (received.isoformat(), self.failures, json.dumps(dict(exclusions), sort_keys=True)))
+                                 (iso_z(received), self.failures, json.dumps(dict(exclusions), sort_keys=True)))
                 log.error('Stop monitor failed three polls; hourly scan remains fallback')
                 if self.notify:
                     self.notify('Paper stop monitor degraded', 'Three failed polls; hourly scan remains fallback.')

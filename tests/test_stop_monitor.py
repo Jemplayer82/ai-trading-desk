@@ -221,10 +221,10 @@ def test_rate_guard_and_heartbeat(monitor_db, tmp_path, monkeypatch):
     instance = monitor(provider, tmp_path)
     instance.poll(now=NOW)
     assert (tmp_path / "heartbeat").exists()
-    clock[0] = 101.9
+    clock[0] = 100.9
     assert instance.poll(now=NOW)["rate_limited"]
     assert len(provider.calls) == 1
-    clock[0] = 102.0
+    clock[0] = 101.0
     assert not instance.poll(now=NOW)["rate_limited"]
     assert len(provider.calls) == 2
 
@@ -262,8 +262,36 @@ def test_failure_alert_after_three_polls_and_recovery(monitor_db, tmp_path, monk
     provider.response = RuntimeError("another isolated outage")
     clock[0] = 108
     instance.poll(now=NOW)
-    assert len(rows(monitor_db, "stop_monitor_alerts")) == 1
+    # one outage alert, one recovery row; an isolated single failure does not alert again
+    assert len(rows(monitor_db, "stop_monitor_alerts")) == 2
     assert provider.order_calls == 0
+
+
+def test_chronic_benign_exclusion_never_hides_a_real_outage(monitor_db, tmp_path, monkeypatch):
+    # one deep-OTM contract quoting 0.00 forever must not count as an outage...
+    open_position()
+    clock = [100.0]
+    monkeypatch.setattr(sm.time, "monotonic", lambda: clock[0])
+    provider = QuotesOnly({SYMBOL: quote(bid=0, ask=0.05)})
+    instance = monitor(provider, tmp_path)
+    for attempt in range(6):
+        clock[0] = 100.0 + 2 * attempt
+        result = instance.poll(now=NOW)
+        assert not result["failed"] and result["exclusions"] == {"invalid_bid": 1}
+    assert rows(monitor_db, "stop_monitor_alerts") == []
+    # ...and a real feed outage afterwards still raises the alert on the third failed poll.
+    provider.response = RuntimeError("synthetic outage")
+    for attempt in range(3):
+        clock[0] = 120.0 + 2 * attempt
+        assert instance.poll(now=NOW)["failed"]
+    assert len(rows(monitor_db, "stop_monitor_alerts")) == 1
+
+
+def test_db_timestamps_use_the_desks_z_form(monitor_db, tmp_path):
+    _, pid = open_position()
+    poll_bid(tmp_path, 12)
+    assert poll_bid(tmp_path, 7)["closed"] == 1
+    assert row(monitor_db, pid)["closed_at"].endswith("Z")
 
 
 def test_trigger_audit_records_quote_peak_level_and_is_idempotent(monitor_db, tmp_path):
