@@ -109,6 +109,24 @@ services:
       - tradingagents-api
   # TIER:2 END
 
+  # TIER:4 BEGIN
+  # Paper-only monitor; coordinator starts after review/merge. No order tools.
+  tradingagents-stop-monitor:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
+    profiles: ["stop-monitor"]
+    entrypoint: ["python", "-m", "web.stop_monitor"]
+    environment:
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    # An intentional kill-file exit must stay stopped.
+    restart: on-failure
+    depends_on:
+      - tradingagents-portfolio
+  # TIER:4 END
+
   # Cron daemon — fires nightly scan + 5am newsletter + hourly token health.
   tradingagents-scheduler:
     image: ghcr.io/jemplayer82/tradingagents:latest

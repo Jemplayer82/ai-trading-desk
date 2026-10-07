@@ -60,6 +60,8 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "web/options_data.py",
         "web/options_allocator.py",
         "web/options_engine.py",
+        "web/stop_monitor.py",
+        "tests/test_stop_monitor.py",
         "web/options_learning.py",
         "web/options_recommend.py",
         "web/options_routes.py",

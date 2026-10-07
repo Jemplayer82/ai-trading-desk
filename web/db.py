@@ -41,7 +41,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2043,8 +2043,13 @@ def close_options_position(
     closed_at: str | None = None,
     exit_bid: float | None = None,
     exit_ask: float | None = None,
+    *,
+    transaction: sqlite3.Connection | None = None,
 ) -> bool:
     """Close an open position at exit_premium and credit proceeds atomically.
+
+    transaction: optional caller-owned active BEGIN IMMEDIATE connection (the real-time stop
+    monitor closes and writes its audit row in one transaction); the caller commits or rolls back.
 
     Returns False (writing nothing) if the position is not open — safe to call
     from concurrent paths. exit_underlying (spot at exit, source 'live' when
@@ -2063,8 +2068,9 @@ def close_options_position(
     if exit_premium is None:
         return False
     exit_premium = round(exit_premium, 4)
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+    with (connect() if transaction is None else nullcontext(transaction)) as conn:
+        if transaction is None:
+            conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
                 "SELECT * FROM options_positions "
@@ -2072,14 +2078,14 @@ def close_options_position(
                 (position_id,),
             ).fetchone()
             if not row:
-                conn.execute("ROLLBACK")
+                (conn.execute("ROLLBACK") if transaction is None else None)
                 return False
             # Every close path records quote evidence, including carried (stale) bids.
             bid = options_fills.price(exit_bid)
             if bid is None:
                 bid, _reason = options_fills.sell_quote(row["current_bid"], row["entry_bid"])
                 if bid is None:
-                    conn.execute("ROLLBACK")
+                    (conn.execute("ROLLBACK") if transaction is None else None)
                     return False
             exit_premium = bid
             ask = options_fills.price(exit_ask if exit_ask is not None else row["current_ask"])
@@ -2105,9 +2111,9 @@ def close_options_position(
                 (int(row["paper_account_id"]), now, exit_value, close_scan_id, position_id,
                  f"close {row['occ_symbol']} ({exit_reason})"),
             )
-            conn.execute("COMMIT")
+            (conn.execute("COMMIT") if transaction is None else None)
         except Exception:
-            conn.execute("ROLLBACK")
+            (conn.execute("ROLLBACK") if transaction is None else None)
             raise
     return True
 
