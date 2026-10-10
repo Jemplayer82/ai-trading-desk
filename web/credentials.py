@@ -168,6 +168,10 @@ def validate_setting_value(key: str, value: str) -> str | None:
     return None
 
 
+# Secrets that may come ONLY from the stack environment: never accepted, stored, shown or overridden through
+# the Settings UI/API (a DB value would win over the stack value in apply_settings_to_env).
+STACK_ONLY_KEYS = frozenset({"CLEO_SCHWAB_MCP_TOKEN"})
+
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}
 _REGISTRY_KEYS = set(_REGISTRY_BY_KEY)
 
@@ -192,6 +196,8 @@ def apply_settings_to_env() -> None:
     applied = 0
     for row in db.list_app_settings():
         key, value = row["key"], row["value"]
+        if key in STACK_ONLY_KEYS:
+            continue
         if value:
             os.environ[key] = value
             applied += 1

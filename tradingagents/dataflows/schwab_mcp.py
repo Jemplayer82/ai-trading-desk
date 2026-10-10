@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any
 
@@ -56,9 +57,18 @@ def _lan_host(url: str) -> bool:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return host == "localhost" or "." not in host  # docker service name such as mcp-schwab
+        # docker service name such as mcp-schwab: letters first, so decimal/hex IP spellings
+        # (134744072, 0x08080808) that the OS resolver would turn into a public address are rejected
+        return host == "localhost" or bool(re.fullmatch(r"[a-z][a-z0-9-]*", host))
     # private, loopback, link-local and the 100.64.0.0/10 Tailscale/CGNAT overlay (the app's default URL lives there)
     return ip.is_private or ip.is_loopback or ip.is_link_local or (ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))
+
+
+def _scrub(text: object) -> str:
+    """Server-supplied error text with the key removed (a door that echoes a rejected header)."""
+    out = str(text)
+    key = (os.environ.get(_KEY_ENV) or "").strip()
+    return out.replace(key, "[redacted]") if key else out
 
 
 def _auth_headers() -> dict[str, str]:
@@ -154,7 +164,7 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
         log.warning("[schwab_mcp] %s: empty/unparseable response", name)
         return None
     if frame.get("error"):
-        log.warning("[schwab_mcp] %s error: %s", name, frame["error"])
+        log.warning("[schwab_mcp] %s error: %s", name, _scrub(frame["error"]))
         return None
 
     result = frame.get("result") or {}
@@ -170,7 +180,7 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
             if isinstance(block, dict) and block.get("type") == "text":
                 detail = block.get("text") or ""
                 break
-        log.warning("[schwab_mcp] %s tool error: %s", name, detail or "(no detail)")
+        log.warning("[schwab_mcp] %s tool error: %s", name, _scrub(detail) or "(no detail)")
         return None
     for block in result.get("content") or []:
         if isinstance(block, dict) and block.get("type") == "text":

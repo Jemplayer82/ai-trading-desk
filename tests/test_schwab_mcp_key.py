@@ -128,4 +128,73 @@ def test_key_only_goes_to_lan_or_docker_hosts(monkeypatch, patched, url, sent):
     monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
     monkeypatch.setenv("SCHWAB_MCP_URL", url)
     headers = schwab_mcp._auth_headers()
-    assert ("Authorization" in headers) == (sent if url else sent)
+    assert ("Authorization" in headers) == sent
+
+
+@pytest.mark.parametrize("url", [
+    "http://134744072/mcp",            # decimal spelling of 8.8.8.8
+    "http://0x08080808/mcp",           # hex spelling
+    "http://0x08.0x08.0x08.0x08/mcp",
+    "http://192.168.1.1@evil.com/mcp",  # userinfo trick
+    "http://[::ffff:8.8.8.8]/mcp",     # IPv4-mapped public IPv6
+    "http://host.docker.internal.evil.com/mcp",
+    "http://mcp-schwab.example.com/mcp",
+    "http://localhost./mcp",
+])
+def test_key_not_sent_to_tricky_or_public_hosts(monkeypatch, url):
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    monkeypatch.setenv("SCHWAB_MCP_URL", url)
+    assert schwab_mcp._auth_headers() == {}
+
+
+def test_key_sent_to_ipv4_mapped_lan_ipv6_and_docker_name(monkeypatch):
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    for url in ("http://[::ffff:192.168.7.50]:3105/mcp", "http://mcp-schwab:3105/mcp"):
+        monkeypatch.setenv("SCHWAB_MCP_URL", url)
+        assert schwab_mcp._auth_headers() == {"Authorization": f"Bearer {KEY}"}
+
+
+def test_redirect_is_not_followed_and_logs_only_the_status(monkeypatch, patched, caplog):
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    monkeypatch.setenv("SCHWAB_MCP_URL", "http://192.168.7.50:3105/mcp")
+    rec = Recorder(status=302, body=""); patched(rec)
+    with caplog.at_level(logging.DEBUG):
+        assert schwab_mcp.call_tool("getAccounts", {}) is None
+    assert len(rec.requests) == 1 and KEY not in caplog.text and "302" in caplog.text
+
+
+def test_server_error_text_echoing_the_key_is_scrubbed(monkeypatch, patched, caplog):
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"message": f"bad Authorization: Bearer {KEY}"}})
+    rec = Recorder(body=body); patched(rec)
+    with caplog.at_level(logging.DEBUG):
+        assert schwab_mcp.call_tool("getAccounts", {}) is None
+    assert KEY not in caplog.text and "[redacted]" in caplog.text
+    tool_error = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"isError": True, "content": [
+        {"type": "text", "text": f"denied {KEY}"}]}})
+    rec = Recorder(body=tool_error); patched(rec)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert schwab_mcp.call_tool("getAccounts", {}) is None
+    assert KEY not in caplog.text
+
+
+def test_settings_api_cannot_store_change_or_clear_the_stack_key(monkeypatch):
+    from fastapi import HTTPException
+
+    from web import credentials as creds
+    from web import main
+    with pytest.raises(HTTPException) as put:
+        main.save_setting_endpoint("cleo_schwab_mcp_token", {"value": "from-the-ui"})
+    assert put.value.status_code == 403
+    with pytest.raises(HTTPException) as delete:
+        main.delete_setting_endpoint("CLEO_SCHWAB_MCP_TOKEN")
+    assert delete.value.status_code == 403
+    # a value that somehow sits in app_settings never overrides the stack environment
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    monkeypatch.setattr(creds.db, "list_app_settings", lambda: [
+        {"key": "CLEO_SCHWAB_MCP_TOKEN", "value": "db-value"}, {"key": "SOME_OTHER_SETTING", "value": "x"}])
+    creds.apply_settings_to_env()
+    import os
+    assert os.environ["CLEO_SCHWAB_MCP_TOKEN"] == KEY and os.environ["SOME_OTHER_SETTING"] == "x"
+    monkeypatch.delenv("SOME_OTHER_SETTING", raising=False)
