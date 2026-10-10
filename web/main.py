@@ -241,6 +241,8 @@ def save_setting_endpoint(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     key = key.strip().upper()
     if not _SETTING_KEY_RE.match(key):
         raise HTTPException(status_code=400, detail="key must match ^[A-Z][A-Z0-9_]*$")
+    if key in creds.STACK_ONLY_KEYS:
+        raise HTTPException(status_code=403, detail=f"{key} is set only on the server stack, not here")
     value = (payload or {}).get("value")
     if value is None or str(value) == "":
         raise HTTPException(status_code=400, detail="missing 'value' in body")
@@ -255,6 +257,8 @@ def save_setting_endpoint(key: str, payload: dict[str, Any]) -> dict[str, Any]:
 @app.delete("/api/settings/{key}")
 def delete_setting_endpoint(key: str) -> dict[str, str]:
     key = key.strip().upper()
+    if key in creds.STACK_ONLY_KEYS:
+        raise HTTPException(status_code=403, detail=f"{key} is set only on the server stack, not here")
     if not db.delete_app_setting(key):
         raise HTTPException(status_code=404, detail="no setting stored for that key")
     # Unset from this process's env so the cleared value stops taking effect

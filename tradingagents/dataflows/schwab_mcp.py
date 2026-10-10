@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any
 
@@ -35,6 +36,55 @@ def _next_id() -> int:
 
 def mcp_url() -> str:
     return (os.environ.get("SCHWAB_MCP_URL") or _DEFAULT_URL).strip() or _DEFAULT_URL
+
+
+_KEY_ENV = "CLEO_SCHWAB_MCP_TOKEN"
+
+
+def _lan_host(url: str) -> bool:
+    """True only for private/loopback addresses and single-label docker service names.
+
+    SCHWAB_MCP_URL can be edited in the settings UI, so the key must never be sent to an arbitrary host.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # docker service name such as mcp-schwab: letters first, so decimal/hex IP spellings
+        # (134744072, 0x08080808) that the OS resolver would turn into a public address are rejected
+        return host == "localhost" or bool(re.fullmatch(r"[a-z][a-z0-9-]*", host))
+    # private, loopback, link-local and the 100.64.0.0/10 Tailscale/CGNAT overlay (the app's default URL lives there)
+    return ip.is_private or ip.is_loopback or ip.is_link_local or (ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))
+
+
+def _scrub(text: object) -> str:
+    """Server-supplied error text with the key removed (a door that echoes a rejected header)."""
+    out = str(text)
+    key = (os.environ.get(_KEY_ENV) or "").strip()
+    return out.replace(key, "[redacted]") if key else out
+
+
+def _auth_headers() -> dict[str, str]:
+    """Bearer key for Cleo's Schwab MCP door, read from the environment on every call.
+
+    The value comes only from the stack environment variable CLEO_SCHWAB_MCP_TOKEN: never from code,
+    never logged, never put in an error message. Unset or blank means no header (the pre-key behaviour,
+    so a deploy of this code before the key is set changes nothing).
+    """
+    key = (os.environ.get(_KEY_ENV) or "").strip()
+    if not key:
+        return {}
+    if not _lan_host(mcp_url()):
+        log.warning("[schwab_mcp] %s is set but SCHWAB_MCP_URL is not a LAN/docker host: key NOT sent", _KEY_ENV)
+        return {}
+    return {"Authorization": f"Bearer {key}"}
 
 
 def schwab_enabled() -> bool:
@@ -92,12 +142,20 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
+        **_auth_headers(),
     }
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(mcp_url(), json=req, headers=headers)
             resp.raise_for_status()
             frame = _parse_frame(resp.text)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            log.warning("[schwab_mcp] %s refused (HTTP %s): the Schwab MCP key (%s) is missing or rejected",
+                        name, exc.response.status_code, _KEY_ENV)
+        else:
+            log.warning("[schwab_mcp] %s call failed: HTTP %s", name, exc.response.status_code)
+        return None
     except Exception as exc:  # noqa: BLE001 — callers fall back to yfinance
         log.warning("[schwab_mcp] %s call failed: %s", name, exc)
         return None
@@ -106,7 +164,7 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
         log.warning("[schwab_mcp] %s: empty/unparseable response", name)
         return None
     if frame.get("error"):
-        log.warning("[schwab_mcp] %s error: %s", name, frame["error"])
+        log.warning("[schwab_mcp] %s error: %s", name, _scrub(frame["error"]))
         return None
 
     result = frame.get("result") or {}
@@ -122,7 +180,7 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
             if isinstance(block, dict) and block.get("type") == "text":
                 detail = block.get("text") or ""
                 break
-        log.warning("[schwab_mcp] %s tool error: %s", name, detail or "(no detail)")
+        log.warning("[schwab_mcp] %s tool error: %s", name, _scrub(detail) or "(no detail)")
         return None
     for block in result.get("content") or []:
         if isinstance(block, dict) and block.get("type") == "text":

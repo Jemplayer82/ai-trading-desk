@@ -9,6 +9,7 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
+      CLEO_SCHWAB_MCP_TOKEN: ${CLEO_SCHWAB_MCP_TOKEN:-}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
@@ -37,6 +38,7 @@ services:
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
       # TIER:2 END
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
+      CLEO_SCHWAB_MCP_TOKEN: ${CLEO_SCHWAB_MCP_TOKEN:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
@@ -96,6 +98,7 @@ services:
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
+      CLEO_SCHWAB_MCP_TOKEN: ${CLEO_SCHWAB_MCP_TOKEN:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
@@ -118,6 +121,7 @@ services:
     entrypoint: ["python", "-m", "web.stop_monitor"]
     environment:
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
+      CLEO_SCHWAB_MCP_TOKEN: ${CLEO_SCHWAB_MCP_TOKEN:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
