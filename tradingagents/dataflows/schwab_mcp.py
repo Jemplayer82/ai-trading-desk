@@ -37,6 +37,20 @@ def mcp_url() -> str:
     return (os.environ.get("SCHWAB_MCP_URL") or _DEFAULT_URL).strip() or _DEFAULT_URL
 
 
+_KEY_ENV = "CLEO_SCHWAB_MCP_TOKEN"
+
+
+def _auth_headers() -> dict[str, str]:
+    """Bearer key for Cleo's Schwab MCP door, read from the environment on every call.
+
+    The value comes only from the stack environment variable CLEO_SCHWAB_MCP_TOKEN: never from code,
+    never logged, never put in an error message. Unset or blank means no header (the pre-key behaviour,
+    so a deploy of this code before the key is set changes nothing).
+    """
+    key = (os.environ.get(_KEY_ENV) or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def schwab_enabled() -> bool:
     """Master switch for ALL Schwab features (account + market data).
 
@@ -92,12 +106,20 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
+        **_auth_headers(),
     }
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(mcp_url(), json=req, headers=headers)
             resp.raise_for_status()
             frame = _parse_frame(resp.text)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            log.warning("[schwab_mcp] %s refused (HTTP %s): the Schwab MCP key (%s) is missing or rejected",
+                        name, exc.response.status_code, _KEY_ENV)
+        else:
+            log.warning("[schwab_mcp] %s call failed: HTTP %s", name, exc.response.status_code)
+        return None
     except Exception as exc:  # noqa: BLE001 — callers fall back to yfinance
         log.warning("[schwab_mcp] %s call failed: %s", name, exc)
         return None
