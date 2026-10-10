@@ -88,7 +88,7 @@ def test_compose_passes_the_key_to_every_service_that_has_the_mcp_url():
     text = Path(__file__).resolve().parents[1].joinpath("docker-compose.yml").read_text()
     services = re.split(r"\n  (?=[A-Za-z0-9_-]+:\n)", text)
     holders = [s for s in services if "SCHWAB_MCP_URL:" in s]
-    assert len(holders) >= 3  # the stop monitor service exists only at tier 4
+    assert holders  # how many services hold the URL differs per tier; every holder must pass the key
     for service in holders:
         assert "CLEO_SCHWAB_MCP_TOKEN: ${CLEO_SCHWAB_MCP_TOKEN:-}" in service
     assert KEY not in text
