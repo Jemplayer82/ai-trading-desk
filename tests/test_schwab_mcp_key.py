@@ -101,7 +101,7 @@ def test_check_script_prints_no_secret_and_no_account_data(monkeypatch, capsys):
     check = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(check)
     monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
-    monkeypatch.setenv("SCHWAB_MCP_URL", "http://door.test:23105/mcp")
+    monkeypatch.setenv("SCHWAB_MCP_URL", "http://192.168.7.50:23105/mcp")
     seen = []
 
     def handler(request):
@@ -115,3 +115,17 @@ def test_check_script_prints_no_secret_and_no_account_data(monkeypatch, capsys):
     assert "key header: attached" in out and "1 account(s)" in out and seen == [f"Bearer {KEY}"]
     assert check.run(no_key=True, transport=httpx.MockTransport(lambda r: httpx.Response(401, text="no", request=r))) == 1
     assert "refused" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("url,sent", [
+    ("http://192.168.7.50:3105/mcp", True), ("http://192.168.1.19:3105/mcp", True),
+    ("http://10.0.0.5:3105/mcp", True), ("http://localhost:3105/mcp", True), ("http://127.0.0.1:3105/mcp", True),
+    ("http://mcp-schwab:3105/mcp", True),
+    ("https://evil.example.com/mcp", False), ("http://8.8.8.8:3105/mcp", False),
+    ("http://100.112.40.124:3105/mcp", True), ("not a url", False), ("", True),
+])
+def test_key_only_goes_to_lan_or_docker_hosts(monkeypatch, patched, url, sent):
+    monkeypatch.setenv("CLEO_SCHWAB_MCP_TOKEN", KEY)
+    monkeypatch.setenv("SCHWAB_MCP_URL", url)
+    headers = schwab_mcp._auth_headers()
+    assert ("Authorization" in headers) == (sent if url else sent)

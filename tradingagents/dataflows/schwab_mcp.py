@@ -40,6 +40,27 @@ def mcp_url() -> str:
 _KEY_ENV = "CLEO_SCHWAB_MCP_TOKEN"
 
 
+def _lan_host(url: str) -> bool:
+    """True only for private/loopback addresses and single-label docker service names.
+
+    SCHWAB_MCP_URL can be edited in the settings UI, so the key must never be sent to an arbitrary host.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host == "localhost" or "." not in host  # docker service name such as mcp-schwab
+    # private, loopback, link-local and the 100.64.0.0/10 Tailscale/CGNAT overlay (the app's default URL lives there)
+    return ip.is_private or ip.is_loopback or ip.is_link_local or (ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))
+
+
 def _auth_headers() -> dict[str, str]:
     """Bearer key for Cleo's Schwab MCP door, read from the environment on every call.
 
@@ -48,7 +69,12 @@ def _auth_headers() -> dict[str, str]:
     so a deploy of this code before the key is set changes nothing).
     """
     key = (os.environ.get(_KEY_ENV) or "").strip()
-    return {"Authorization": f"Bearer {key}"} if key else {}
+    if not key:
+        return {}
+    if not _lan_host(mcp_url()):
+        log.warning("[schwab_mcp] %s is set but SCHWAB_MCP_URL is not a LAN/docker host: key NOT sent", _KEY_ENV)
+        return {}
+    return {"Authorization": f"Bearer {key}"}
 
 
 def schwab_enabled() -> bool:
