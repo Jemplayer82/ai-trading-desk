@@ -33,6 +33,8 @@ Required env vars (same as Cleo):
 
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: codex)
+  CLEO_WORKERS            Parallel Codex calls (default 8; the desk host runs 4 to avoid
+                          chatgpt.com 403 bursts during the nightly research scan)
   CODEX_BIN               Path to the codex CLI (default: codex)
   CODEX_CALL_TIMEOUT_S    Per-call hard deadline (default: 170, below the
                           desk's 180 s client timeout)

@@ -22,6 +22,9 @@ role, or both in the dashboard.
    separate from Cleo's own `/home/landon/cleo_llm_handler.py`, which is left alone.
 3. Env: `/etc/codex-llm/codex-llm.env` (mode 600) with Cleo's
    `SWITCHBOARD_URL` and `SWITCHBOARD_MCP_TOKEN`, plus `SWITCHBOARD_AGENT_ID=codex`.
+   Also set `CLEO_WORKERS=4` (parallel Codex calls; default 8). At 8 parallel `codex exec`
+   sessions (about 60 calls a minute in the nightly research scan) chatgpt.com answered about
+   16% of calls with 403 Forbidden (found 10/23/2026, desk card 14). Cleo's own service keeps the default 8.
 4. Service: install `codex-llm.service` into `/etc/systemd/system/`, then
    `systemctl daemon-reload && systemctl enable --now codex-llm`.
 
