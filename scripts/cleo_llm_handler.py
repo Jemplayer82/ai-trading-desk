@@ -77,6 +77,15 @@ REAP_GRACE_S = float(os.environ.get("CLEO_REAP_GRACE_S", "5"))
 # requester already gives up after its own 180s timeout.
 MAX_INFLIGHT = int(os.environ.get("CLEO_MAX_INFLIGHT", "16"))
 
+# How many requests run at the same time. 8 by default (Cleo's Claude CLI). The Codex service sets
+# CLEO_WORKERS=4: at 8 parallel `codex exec` sessions (about 60 calls a minute during the nightly
+# research scan) chatgpt.com started answering about 16% of calls with 403 Forbidden.
+def worker_count() -> int:
+    try:
+        return max(1, int(os.environ.get("CLEO_WORKERS", "8")))
+    except ValueError:
+        return 8
+
 # Escalation ladder for shutting the CLI down. SIGKILL doesn't exist on Windows
 # (a dev box running the tests), so fall back to SIGTERM there.
 _SIG_ESCALATION = (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -947,7 +956,7 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
             lambda activity, p=peer: bus_call(p["base"], p["token"], "set_status",
                                               {"agent_id": agent_id, "activity": activity}))
 
-    executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
+    executor = ThreadPoolExecutor(max_workers=worker_count(), thread_name_prefix="cleo")
     # Backpressure. Without this, every inbound request is submitted to an
     # unbounded queue holding full conversation payloads; a TradingAgents analyst
     # fan-out that outruns the workers grows it without limit.
