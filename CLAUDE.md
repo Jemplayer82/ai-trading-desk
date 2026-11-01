@@ -56,7 +56,7 @@ you touch those entries.
 Two things that trip people up:
 
 - **There is no Sonnet 4.8.** The Sonnet line runs 4.5 → 4.6 → 5; only Opus
-  has a 4.8. "Sonnet 4.8" means `claude-sonnet-5`.
+  has a 4.8. "Sonnet 4.8" means `claude-sonnet-5-5` (the newest Sonnet; 5.5 as of 11/01/2026).
 - **Adding a model may need an `effort` change too.** `anthropic_client.py`
   gates the `effort` parameter by model family — Haiku and Sonnet 4.5 reject
   it with a 400, everything else from Opus 4.5 / Sonnet 4.6 on accepts it.

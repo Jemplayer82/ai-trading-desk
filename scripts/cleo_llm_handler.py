@@ -22,7 +22,7 @@ Required env vars:
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: cleo)
   DEFAULT_MODEL           Fallback model if the request doesn't specify one
-                          (default: claude-sonnet-5)
+                          (default: claude-sonnet-5-5)
   CLAUDE_BIN              Path to claude CLI binary (default: claude)
 
 Usage:
@@ -55,7 +55,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # surface through our own warnings.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-5")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-5-5")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 
 # Hard ceiling on a single claude -p call. The watchdog kills the subprocess past

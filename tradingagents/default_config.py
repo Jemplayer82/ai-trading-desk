@@ -166,8 +166,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "options_lessons_max_chars": 1200,
     # LLM settings
     "llm_provider": "openai",
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    "deep_think_llm": "gpt-6.1-sol",
+    "quick_think_llm": "gpt-6-luna",
     # Which LLM tier drives the Research Manager's debate synthesis.
     # "quick" (default) -- the deep model's route has a documented live
     # timeout failure for this call shape; set to "deep" (env override

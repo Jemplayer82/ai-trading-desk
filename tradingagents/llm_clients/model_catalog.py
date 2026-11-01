@@ -13,15 +13,13 @@ ProviderModeOptions = Dict[str, Dict[str, List[ModelOption]]]
 # All GLM 4.7+ entries support thinking mode via thinking={"type":"enabled"}.
 _GLM_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
+        ("GLM-5.3 - Latest flagship, 1M ctx (reasoning always on; set effort low for speed)", "glm-5.3"),
         ("GLM-5-Turbo - Fast, switchable thinking modes", "glm-5-turbo"),
-        ("GLM-4.7 - Previous-gen flagship", "glm-4.7"),
-        ("GLM-4.5-Air - Lightweight, cost-efficient", "glm-4.5-air"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
-        ("GLM-5.1 - Latest flagship, 204K ctx", "glm-5.1"),
-        ("GLM-5 - Flagship, 204K ctx", "glm-5"),
-        ("GLM-4.7 - Previous-gen flagship", "glm-4.7"),
+        ("GLM-5.3 - Latest flagship, 1M ctx, 128K output", "glm-5.3"),
+        ("GLM-5.1 - Previous-gen flagship, 204K ctx", "glm-5.1"),
         ("Custom model ID", "custom"),
     ],
 }
@@ -39,35 +37,30 @@ _GLM_MODELS: Dict[str, List[ModelOption]] = {
 # "Custom model ID".
 _QWEN_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
-        ("Qwen 3.6 Flash - Latest fast, agentic coding + vision-language", "qwen3.6-flash"),
-        ("Qwen 3.5 Flash - Previous-gen fast", "qwen3.5-flash"),
+        ("Qwen 3.8 Flash - Latest fast and cost-effective", "qwen3.8-flash"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
-        ("Qwen 3.6 Plus - Flagship vision-language, agentic coding SOTA", "qwen3.6-plus"),
-        ("Qwen 3.5 Plus - Previous-gen flagship", "qwen3.5-plus"),
-        ("Qwen 3 Max - Specialized for agent programming + tool use", "qwen3-max"),
+        ("Qwen 3.8 Max - Latest flagship, complex reasoning and coding", "qwen3.8-max"),
+        ("Qwen 3.7 Plus - Balanced performance, speed and cost", "qwen3.7-plus"),
         ("Custom model ID", "custom"),
     ],
 }
 
 
 # Shared model list for MiniMax's global and CN endpoints (same IDs).
-# Full official lineup per platform.minimax.io/docs/api-reference/text-openai-api.
-# All M2.x models share a 204,800-token context window.
+# Source: platform.minimax.io/docs/guides/text-generation (checked 11/01/2026: M3.1-Flash is the latest,
+# M3 remains available; M2.x models have a 204,800-token context window).
 _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
+        ("MiniMax-M3.1-Flash - Latest M-series, 1M ctx", "MiniMax-M3.1-Flash"),
         ("MiniMax-M2.7-highspeed - Faster M2.7, 204K ctx, ~100 TPS", "MiniMax-M2.7-highspeed"),
-        ("MiniMax-M2.5-highspeed - Previous-gen highspeed, 204K ctx", "MiniMax-M2.5-highspeed"),
-        ("MiniMax-M2.1-highspeed - M2.1 highspeed, 204K ctx", "MiniMax-M2.1-highspeed"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
-        ("MiniMax-M2.7 - Flagship, SOTA on coding/agent benchmarks, 204K ctx", "MiniMax-M2.7"),
-        ("MiniMax-M2.7-highspeed - Same quality as M2.7, ~100 TPS", "MiniMax-M2.7-highspeed"),
-        ("MiniMax-M2.5 - Previous-gen flagship, 204K ctx", "MiniMax-M2.5"),
-        ("MiniMax-M2.1 - Earlier M2 line, 204K ctx", "MiniMax-M2.1"),
-        ("MiniMax-M2 - Base M2, 204K ctx", "MiniMax-M2"),
+        ("MiniMax-M3.1-Flash - Latest M-series, 1M ctx", "MiniMax-M3.1-Flash"),
+        ("MiniMax-M3 - Flagship, 1M ctx", "MiniMax-M3"),
+        ("MiniMax-M2.7 - Previous-gen flagship, 204K ctx", "MiniMax-M2.7"),
         ("Custom model ID", "custom"),
     ],
 }
@@ -76,18 +69,19 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
-            ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
-            ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
-            ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
-            ("GPT-4.1 - Smartest non-reasoning model", "gpt-4.1"),
+            ("GPT-6 Luna - Latest fast model", "gpt-6-luna"),
+            ("GPT-6.1 Terra - Latest balanced model", "gpt-6.1-terra"),
         ],
         "deep": [
-            ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
-            ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
-            ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
-            ("GPT-5.5 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.5-pro"),
+            ("GPT-6.1 Sol - Latest workhorse", "gpt-6.1-sol"),
+            ("GPT-6 Astra - Latest frontier, most capable, highest cost", "gpt-6-astra"),
+            ("GPT-6.1 Terra - Latest balanced model", "gpt-6.1-terra"),
         ],
     },
+    # OpenAI. Source: the "Flagship models" cards of https://developers.openai.com/api/docs/models,
+    # checked 11/01/2026 (no OpenAI key on the desk, so these IDs are NOT smoke-tested). The same four
+    # families are what the ChatGPT-plan route (switchboard "chatgpt:<family>") resolves to.
+    #
     # Anthropic. Source: the "Claude API alias" row of
     # https://platform.claude.com/docs/en/about-claude/models/overview.md
     #
@@ -105,61 +99,58 @@ MODEL_OPTIONS: ProviderModeOptions = {
     #
     # No always-latest entry is possible HERE. Anthropic retired evergreen
     # pointers with the 4.6 generation, so there is no `claude-opus-latest` and
-    # `claude-opus-5` will never become Opus 6; a bare `opus` sent to the REST
+    # `claude-opus-5-5` will never become Opus 6; a bare `opus` sent to the REST
     # API is a 404. The always-latest names live under "switchboard" below,
     # where the Claude CLI resolves them for us.
     #
-    # Last verified 2026-08-06.
+    # Last verified 2026-11-01: the four IDs below were each called through AnthropicClient
+    # (Opus 5.5 and Sonnet 5.5 with the effort setting) and the account's /v1/models list shows no newer ones.
     "anthropic": {
         "quick": [
-            ("Claude Sonnet 5 - Best speed and intelligence balance", "claude-sonnet-5"),
-            ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
-            ("Claude Sonnet 4.6 - Previous-gen balanced", "claude-sonnet-4-6"),
+            ("Claude Sonnet 5.5 - Latest, best speed and intelligence balance", "claude-sonnet-5-5"),
+            ("Claude Haiku 5.5 - Latest, fastest", "claude-haiku-5-5"),
         ],
         "deep": [
-            ("Claude Opus 5 - Latest frontier, complex agentic and enterprise work", "claude-opus-5"),
-            ("Claude Opus 4.8 - Previous frontier Opus, long-running agents", "claude-opus-4-8"),
-            ("Claude Sonnet 5 - Near-Opus quality at Sonnet cost", "claude-sonnet-5"),
-            ("Claude Opus 4.7 - Older Opus, still available", "claude-opus-4-7"),
+            ("Claude Opus 5.5 - Latest frontier, complex agentic and enterprise work", "claude-opus-5-5"),
+            ("Claude Sonnet 5.5 - Latest, near-Opus quality at Sonnet cost", "claude-sonnet-5-5"),
         ],
     },
+    # Google. Source: https://ai.google.dev/gemini-api/docs/models, checked 11/01/2026 (no Google key on
+    # the desk, so NOT smoke-tested). gemini-4-argon went GA 10/13/2026; its introductory price rises after 11/30/2026.
     "google": {
         "quick": [
-            ("Gemini 3 Flash - Next-gen fast (preview)", "gemini-3-flash-preview"),
-            ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
-            ("Gemini 3.1 Flash Lite - Most cost-efficient (GA)", "gemini-3.1-flash-lite"),
-            ("Gemini 2.5 Flash Lite - Fast, low-cost", "gemini-2.5-flash-lite"),
+            ("Gemini 3.8 Flash - Latest fast model (stable)", "gemini-3.8-flash"),
+            ("Gemini 3.5 Flash Lite - Latest, most cost-efficient (stable)", "gemini-3.5-flash-lite"),
         ],
         "deep": [
-            ("Gemini 3.1 Pro - Reasoning-first, complex workflows (preview)", "gemini-3.1-pro-preview"),
-            ("Gemini 3 Flash - Next-gen fast (preview)", "gemini-3-flash-preview"),
-            ("Gemini 2.5 Pro - Stable pro model", "gemini-2.5-pro"),
-            ("Gemini 2.5 Flash - Balanced, stable", "gemini-2.5-flash"),
+            ("Gemini 4 Argon - Latest flagship reasoning model (stable)", "gemini-4-argon"),
+            ("Gemini 3.1 Pro - Newest Pro, complex workflows (preview)", "gemini-3.1-pro-preview"),
+            ("Gemini 3.8 Flash - Latest fast model (stable)", "gemini-3.8-flash"),
         ],
     },
+    # xAI. Source: https://docs.x.ai/docs/models, checked 11/01/2026 (no xAI key on the desk, NOT smoke-tested).
     "xai": {
         "quick": [
-            ("Grok 4.20 (Non-Reasoning) - Latest, speed-optimized", "grok-4.20-non-reasoning"),
-            ("Grok 4 Fast (Non-Reasoning) - Speed optimized", "grok-4-fast-non-reasoning"),
-            ("Grok 4 Fast (Reasoning) - High-performance", "grok-4-fast-reasoning"),
+            ("Grok 4.20 (Non-Reasoning) - Newest non-reasoning model listed", "grok-4.20-0309-non-reasoning"),
+            ("Grok 4.3 - 1M context", "grok-4.3"),
         ],
         "deep": [
-            ("Grok 4.20 (Reasoning) - Latest frontier reasoning model", "grok-4.20-reasoning"),
-            ("Grok 4 - Flagship (dated build)", "grok-4-0709"),
-            ("Grok 4 Fast (Reasoning) - High-performance", "grok-4-fast-reasoning"),
-            ("Grok 4.20 - Auto-select reasoning behavior", "grok-4.20"),
+            ("Grok 4.7 - Latest, most capable, reasoning, 500K ctx", "grok-4.7"),
+            ("Grok 4.6 - Previous-gen, 500K ctx", "grok-4.6"),
+            ("Grok 4.20 (Reasoning) - 1M ctx", "grok-4.20-0309-reasoning"),
         ],
     },
+    # DeepSeek. Source: https://api-docs.deepseek.com/quick_start/pricing, checked 11/01/2026 (NOT smoke-tested,
+    # no DeepSeek key on the desk). The page serves only deepseek-flash (V4.1) and deepseek-v4-pro; the old
+    # deepseek-chat / deepseek-reasoner / deepseek-v4-flash names are no longer listed.
     "deepseek": {
         "quick": [
-            ("DeepSeek V4 Flash - Latest V4 fast model", "deepseek-v4-flash"),
-            ("DeepSeek V3.2", "deepseek-chat"),
+            ("DeepSeek V4.1 Flash - Latest fast model", "deepseek-flash"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("DeepSeek V4 Pro - Latest V4 flagship model", "deepseek-v4-pro"),
-            ("DeepSeek V3.2 (thinking)", "deepseek-reasoner"),
-            ("DeepSeek V3.2", "deepseek-chat"),
+            ("DeepSeek V4 Pro - Latest flagship model", "deepseek-v4-pro"),
+            ("DeepSeek V4.1 Flash - Latest fast model", "deepseek-flash"),
             ("Custom model ID", "custom"),
         ],
     },
@@ -189,19 +180,25 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # glm-4.7-flash:latest set all went dead this way). To refresh:
     #   curl -sH "Authorization: Bearer $OLLAMA_API_KEY" \
     #        https://ollama.com/v1/models | jq -r '.data[].id' | sort
-    # Last verified 2026-07-25 (every id below smoke-tested with a live
-    # chat.completions call, not just presence in the list).
+    # Last verified 2026-11-01 (every id below smoke-tested with a live
+    # chat.completions call, not just presence in the list). qwen3.5:397b and
+    # deepseek-v4-flash were retired 09/25/2026 (HTTP 410) and are gone from this list.
     "ollama": {
         "quick": [
+            ("GLM-5.3 Flash", "glm-5.3-flash"),
+            ("DeepSeek V4.1 Flash", "deepseek-v4.1-flash"),
+            ("MiniMax M3.1 Flash", "minimax-m3.1-flash"),
             ("GPT-OSS 20B", "gpt-oss:20b"),
-            ("GLM-5.2", "glm-5.2"),
-            ("DeepSeek V4 Flash", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
+            ("Kimi K3", "kimi-k3"),
+            ("GLM-5.3", "glm-5.3"),
+            ("DeepSeek V4 Pro", "deepseek-v4-pro:0813"),
+            ("MiniMax M3", "minimax-m3"),
+            ("Mistral Large 4", "mistral-large-4"),
+            ("Nemotron 3 Ultra", "nemotron-3-ultra"),
             ("GPT-OSS 120B", "gpt-oss:120b"),
-            ("Qwen3.5 397B", "qwen3.5:397b"),
-            ("GLM-5.2", "glm-5.2"),
             ("Custom model ID", "custom"),
         ],
     },
@@ -217,7 +214,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # WebServer, CLI 2.1.283, 2026-09-26):
     #
     #     opus   -> claude-opus-5-5
-    #     sonnet -> claude-sonnet-5
+    #     sonnet -> claude-sonnet-5-5
     #     fable  -> claude-fable-5-1   (deep only: thinking is always on, ~24 s
     #                                   for a one-word reply — too slow for the
     #                                   quick/analyst path, never the default)
@@ -232,8 +229,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # SWITCHBOARD_CHATGPT_AGENT, default "codex"), which runs `codex exec` on the
     # host's ChatGPT sign-in. Each family (Astra frontier, Sol workhorse, Luna
     # fast, Terra balanced) resolves at call time to its newest model, so these
-    # never pin a version (2026-09-27: gpt-6-astra, gpt-6-sol, gpt-6-luna,
-    # gpt-5.6-terra). Pin one with Custom model ID "chatgpt:<model-id>". Routing
+    # never pin a version (11/01/2026: gpt-6-astra, gpt-6.1-sol, gpt-6-luna,
+    # gpt-6.1-terra). Pin one with Custom model ID "chatgpt:<model-id>". Routing
     # is per model, so the quick and deep roles can use different handlers.
     #
     # The tradeoff: an always-latest name means the model under your analysis

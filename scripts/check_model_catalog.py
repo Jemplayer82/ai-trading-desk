@@ -75,6 +75,7 @@ DELIBERATELY_EXCLUDED = {
     # is a 400), requires 30-day data retention, and can answer with
     # stop_reason="refusal" — none of which AnthropicClient handles yet.
     "claude-fable-5",
+    "claude-fable-5-1",   # the same reasons apply to Fable 5.1; offered only via switchboard's "fable" alias
     # Project Glasswing only: invitation-gated, so an entry in the dropdown
     # would 404 for everyone who isn't in the program.
     "claude-mythos-5",
