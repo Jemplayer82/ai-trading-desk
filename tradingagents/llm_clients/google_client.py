@@ -41,13 +41,14 @@ class GoogleClient(BaseLLMClient):
             llm_kwargs["google_api_key"] = google_api_key
 
         # Map thinking_level to appropriate API param based on model
+        # Gemini 3+ / 4 use thinking_level (Gemini 4 Argon is treated like Gemini 3 Pro)
         # Gemini 3 Pro: low, high
         # Gemini 3 Flash: minimal, low, medium, high
         # Gemini 2.5: thinking_budget (0=disable, -1=dynamic)
         thinking_level = self.kwargs.get("thinking_level")
         if thinking_level:
             model_lower = self.model.lower()
-            if "gemini-3" in model_lower:
+            if "gemini-3" in model_lower or "gemini-4" in model_lower:
                 # Gemini 3 Pro doesn't support "minimal", use "low" instead
                 if "pro" in model_lower and thinking_level == "minimal":
                     thinking_level = "low"

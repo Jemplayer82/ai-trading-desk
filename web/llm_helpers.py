@@ -93,9 +93,9 @@ def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0
     role_key = "deep_llm_provider" if deep else "quick_llm_provider"
     provider = (config.get(role_key) or config.get("llm_provider") or "ollama").lower()
     if deep:
-        model = config.get("deep_think_llm") or "gpt-oss:120b-cloud"
+        model = config.get("deep_think_llm") or "gpt-oss:120b"
     else:
-        model = config.get("quick_think_llm") or "gpt-oss:20b-cloud"
+        model = config.get("quick_think_llm") or "gpt-oss:20b"
 
     if provider == "switchboard":
         from tradingagents.llm_clients import create_llm_client

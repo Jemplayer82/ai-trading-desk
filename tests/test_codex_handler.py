@@ -282,3 +282,17 @@ def test_codex_daemon_does_not_touch_cleos_inbox_or_auth_alarm(codex, monkeypatc
     base._dispatch({"id": 2, "from": "x", "content": "{bad json"}, "http://bus", "t", "codex",
                    None, backend=codex.call_codex_streaming)
     assert "auth" not in calls
+
+
+def test_worker_count_defaults_to_eight_and_can_be_lowered_by_env(monkeypatch):
+    spec = importlib.util.spec_from_file_location("cleo_llm_handler_workers", _REPO / "scripts" / "cleo_llm_handler.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.delenv("CLEO_WORKERS", raising=False)
+    assert mod.worker_count() == 8
+    monkeypatch.setenv("CLEO_WORKERS", "4")
+    assert mod.worker_count() == 4
+    monkeypatch.setenv("CLEO_WORKERS", "0")
+    assert mod.worker_count() == 1                 # never zero workers
+    monkeypatch.setenv("CLEO_WORKERS", "abc")
+    assert mod.worker_count() == 8                 # a bad value falls back to the default

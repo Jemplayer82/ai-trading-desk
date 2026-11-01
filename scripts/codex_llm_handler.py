@@ -33,6 +33,8 @@ Required env vars (same as Cleo):
 
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: codex)
+  CLEO_WORKERS            Parallel Codex calls (default 8; the desk host runs 4 to avoid
+                          chatgpt.com 403 bursts during the nightly research scan)
   CODEX_BIN               Path to the codex CLI (default: codex)
   CODEX_CALL_TIMEOUT_S    Per-call hard deadline (default: 170, below the
                           desk's 180 s client timeout)
@@ -85,13 +87,13 @@ _ROLE_LABEL = {"user": "USER", "assistant": "ASSISTANT", "system": "SYSTEM", "to
 
 # ChatGPT model families offered in the desk's menus. The desk sends
 # "chatgpt:<family>"; the handler resolves it at call time to the newest model
-# of that family the Codex CLI lists (e.g. "sol" -> "gpt-6-sol", and "terra" ->
-# "gpt-5.6-terra" until a GPT-6 Terra ships), so the menus never pin a version.
+# of that family the Codex CLI lists (e.g. "sol" -> "gpt-6.1-sol", "terra" ->
+# "gpt-6.1-terra"), so the menus never pin a version.
 FAMILIES = ("astra", "sol", "luna", "terra")
-# Used only if `codex debug models` cannot be read (verified 2026-09-27).
+# Used only if `codex debug models` cannot be read (verified 11/01/2026).
 FALLBACK_FAMILY_MODELS = {
-    "astra": "gpt-6-astra", "sol": "gpt-6-sol",
-    "luna": "gpt-6-luna", "terra": "gpt-5.6-terra",
+    "astra": "gpt-6-astra", "sol": "gpt-6.1-sol",
+    "luna": "gpt-6-luna", "terra": "gpt-6.1-terra",
 }
 MODEL_LIST_TTL_S = float(os.environ.get("CODEX_MODEL_LIST_TTL_S", "3600"))
 # After a failed/empty model-list load, use the fallback table for this long

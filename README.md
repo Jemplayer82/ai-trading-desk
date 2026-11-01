@@ -450,10 +450,10 @@ The daemon handles up to 8 concurrent requests so back-to-back analyst calls dur
 The Switchboard dropdowns list model **families**, never pinned versions, so the
 desk moves to each new release on its own:
 
-| Entry | Handler | Resolves to (2026-09-27) |
+| Entry | Handler | Resolves to (Codex row read 11/01/2026; Claude row as verified 09/26, newer 5.5 models exist) |
 |---|---|---|
 | Sonnet / Opus / Fable (deep only) | Cleo | `claude-sonnet-5` / `claude-opus-5-5` / `claude-fable-5-1` via the CLI's family aliases |
-| ChatGPT Astra / Sol / Luna / Terra | Codex | `gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-terra`, the newest listed model per family |
+| ChatGPT Astra / Sol / Luna / Terra | Codex | `gpt-6-astra` / `gpt-6.1-sol` / `gpt-6-luna` / `gpt-6.1-terra`, the newest listed model per family |
 
 To pin a specific version, type its ID into **Custom model ID** (a Claude ID, or
 `chatgpt:<model-id>` for ChatGPT).

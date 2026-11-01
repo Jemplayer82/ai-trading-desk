@@ -30,13 +30,13 @@ from tradingagents.graph.signal_processing import SignalProcessor
 from tradingagents.llm_clients import create_llm_client
 
 PROVIDER_DEFAULTS = {
-    "openai": ("gpt-5.4-mini", None),
-    "google": ("gemini-2.5-flash", None),
-    "anthropic": ("claude-sonnet-5", None),
-    "deepseek": ("deepseek-chat", None),
-    "qwen": ("qwen-plus", None),
-    "glm": ("glm-5", None),
-    "xai": ("grok-4", None),
+    "openai": ("gpt-6-luna", None),
+    "google": ("gemini-3.8-flash", None),
+    "anthropic": ("claude-sonnet-5-5", None),
+    "deepseek": ("deepseek-flash", None),
+    "qwen": ("qwen3.8-flash", None),
+    "glm": ("glm-5.3", None),
+    "xai": ("grok-4.7", None),
 }
 
 

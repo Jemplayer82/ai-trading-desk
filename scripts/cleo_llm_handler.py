@@ -22,7 +22,7 @@ Required env vars:
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: cleo)
   DEFAULT_MODEL           Fallback model if the request doesn't specify one
-                          (default: claude-sonnet-5)
+                          (default: claude-sonnet-5-5)
   CLAUDE_BIN              Path to claude CLI binary (default: claude)
 
 Usage:
@@ -55,7 +55,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # surface through our own warnings.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-5")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-5-5")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 
 # Hard ceiling on a single claude -p call. The watchdog kills the subprocess past
@@ -76,6 +76,15 @@ REAP_GRACE_S = float(os.environ.get("CLEO_REAP_GRACE_S", "5"))
 # exactly like a memory leak. Rejecting fast beats queueing forever: the
 # requester already gives up after its own 180s timeout.
 MAX_INFLIGHT = int(os.environ.get("CLEO_MAX_INFLIGHT", "16"))
+
+# How many requests run at the same time. 8 by default (Cleo's Claude CLI). The Codex service sets
+# CLEO_WORKERS=4: at 8 parallel `codex exec` sessions (about 60 calls a minute during the nightly
+# research scan) chatgpt.com started answering about 16% of calls with 403 Forbidden.
+def worker_count() -> int:
+    try:
+        return max(1, int(os.environ.get("CLEO_WORKERS", "8")))
+    except ValueError:
+        return 8
 
 # Escalation ladder for shutting the CLI down. SIGKILL doesn't exist on Windows
 # (a dev box running the tests), so fall back to SIGTERM there.
@@ -947,7 +956,7 @@ def main(backend=None, display_name: str = "Cleo (Claude daemon)",
             lambda activity, p=peer: bus_call(p["base"], p["token"], "set_status",
                                               {"agent_id": agent_id, "activity": activity}))
 
-    executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
+    executor = ThreadPoolExecutor(max_workers=worker_count(), thread_name_prefix="cleo")
     # Backpressure. Without this, every inbound request is submitted to an
     # unbounded queue holding full conversation payloads; a TradingAgents analyst
     # fan-out that outruns the workers grows it without limit.

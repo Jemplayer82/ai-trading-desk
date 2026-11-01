@@ -111,7 +111,7 @@ class TestCatalogDiff:
     def test_retired_model_in_catalog_fails(self, checker, monkeypatch):
         ours = {m for models in checker.catalog_model_ids().values() for m in models}
         monkeypatch.setattr(
-            checker, "fetch_live_model_ids", lambda *a, **k: ours - {"claude-opus-5"}
+            checker, "fetch_live_model_ids", lambda *a, **k: ours - {"claude-opus-5-5"}
         )
         monkeypatch.setattr("sys.argv", ["check_model_catalog.py"])
         assert checker.main() == 1
