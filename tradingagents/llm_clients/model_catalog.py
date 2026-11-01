@@ -214,7 +214,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # WebServer, CLI 2.1.283, 2026-09-26):
     #
     #     opus   -> claude-opus-5-5
-    #     sonnet -> claude-sonnet-5-5
+    #     sonnet -> claude-sonnet-5   (as verified 2026-09-26; the newest Sonnet is now 5.5 and the CLI
+    #                                  should resolve to it, NOT re-verified: the host's Claude login is out)
     #     fable  -> claude-fable-5-1   (deep only: thinking is always on, ~24 s
     #                                   for a one-word reply — too slow for the
     #                                   quick/analyst path, never the default)
@@ -229,8 +230,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # SWITCHBOARD_CHATGPT_AGENT, default "codex"), which runs `codex exec` on the
     # host's ChatGPT sign-in. Each family (Astra frontier, Sol workhorse, Luna
     # fast, Terra balanced) resolves at call time to its newest model, so these
-    # never pin a version (11/01/2026: gpt-6-astra, gpt-6.1-sol, gpt-6-luna,
-    # gpt-6.1-terra). Pin one with Custom model ID "chatgpt:<model-id>". Routing
+    # never pin a version (11/01/2026, read from `codex debug models` on the host:
+    # gpt-6-astra, gpt-6.1-sol, gpt-6-luna, gpt-6.1-terra). Pin one with Custom model ID "chatgpt:<model-id>". Routing
     # is per model, so the quick and deep roles can use different handlers.
     #
     # The tradeoff: an always-latest name means the model under your analysis

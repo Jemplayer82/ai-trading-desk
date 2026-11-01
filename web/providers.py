@@ -44,22 +44,25 @@ def _is_ollama_cloud(url: str | None) -> bool:
 # Entries are also verified to support tool calling, which the analysts require
 # (they bind get_stock_data / get_indicators — a model without tool support
 # fails the whole graph).
-# Last verified: 2026-08-06 (all entries below smoke-tested with a live call).
+# Last verified: 2026-11-01 (every entry below answered a live chat call AND returned a tool call).
+# qwen3.5:397b and deepseek-v4-flash were retired 09/25/2026 (HTTP 410) and are gone.
 _OLLAMA_CLOUD_MODELS = {
     "quick": [
-        ("GPT-OSS 20B (cloud) — default", "gpt-oss:20b-cloud"),
-        ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
-        ("DeepSeek V4 Flash", "deepseek-v4-flash"),
+        ("DeepSeek V4.1 Flash — default", "deepseek-v4.1-flash"),
+        ("GLM-5.3 Flash", "glm-5.3-flash"),
+        ("MiniMax M3.1 Flash", "minimax-m3.1-flash"),
+        ("GPT-OSS 20B", "gpt-oss:20b"),
         ("Nemotron 3 Nano 30B", "nemotron-3-nano:30b"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
         ("DeepSeek V4 Pro — default", "deepseek-v4-pro"),
-        ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
-        ("GPT-OSS 20B (cloud)", "gpt-oss:20b-cloud"),
-        ("Kimi K2.6", "kimi-k2.6"),
-        ("GLM-5.2", "glm-5.2"),
-        ("Qwen3.5 397B", "qwen3.5:397b"),
+        ("Kimi K3", "kimi-k3"),
+        ("GLM-5.3", "glm-5.3"),
+        ("MiniMax M3", "minimax-m3"),
+        ("Mistral Large 4", "mistral-large-4"),
+        ("Nemotron 3 Ultra", "nemotron-3-ultra"),
+        ("GPT-OSS 120B", "gpt-oss:120b"),
         ("Custom model ID", "custom"),
     ],
 }

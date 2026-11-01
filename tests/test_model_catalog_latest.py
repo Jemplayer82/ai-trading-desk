@@ -37,9 +37,22 @@ def test_anthropic_list_has_only_the_current_generation():
     assert ids == {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
 
 
-def test_retired_ollama_cloud_models_are_gone():
-    ids = {v for mode in ("quick", "deep") for _, v in MODEL_OPTIONS["ollama"][mode]}
-    assert "qwen3.5:397b" not in ids and "deepseek-v4-flash" not in ids      # HTTP 410 since 09/25/2026
+def test_retired_ollama_cloud_models_are_gone_from_both_lists():
+    """The deployed stack uses web.providers._OLLAMA_CLOUD_MODELS (OLLAMA_BASE_URL is ollama.com);
+    MODEL_OPTIONS['ollama'] is the local-server list. Both must be free of the HTTP 410 names."""
+    from web.providers import _OLLAMA_CLOUD_MODELS
+    retired = {"qwen3.5:397b", "deepseek-v4-flash", "kimi-k2.6", "glm-5.2"}
+    for lists in (_OLLAMA_CLOUD_MODELS, MODEL_OPTIONS["ollama"]):
+        ids = {v for mode in ("quick", "deep") for _, v in lists[mode]}
+        assert not (ids & {"qwen3.5:397b", "deepseek-v4-flash"}), ids
+    cloud = {v for mode in ("quick", "deep") for _, v in _OLLAMA_CLOUD_MODELS[mode]}
+    assert not (cloud & retired), cloud & retired
+
+
+def test_ollama_cloud_defaults_are_the_newest_smoke_tested_models():
+    from web.providers import _OLLAMA_CLOUD_MODELS
+    first = lambda mode: next(v for _, v in _OLLAMA_CLOUD_MODELS[mode] if v != "custom")
+    assert first("quick") == "deepseek-v4.1-flash" and first("deep") == "deepseek-v4-pro"
 
 
 def test_no_list_repeats_a_model_within_one_mode():
