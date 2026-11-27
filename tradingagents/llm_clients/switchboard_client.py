@@ -12,14 +12,18 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable, Iterator, List, Optional
+from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 import httpx
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_core.tools import BaseTool
+from langchain_core.runnables import RunnableLambda
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import Field
 
 from .base_client import BaseLLMClient
@@ -93,9 +97,18 @@ def _to_anthropic_format(messages: list[BaseMessage]) -> tuple[str, list[dict]]:
 
 
 def _format_tools(tools: list) -> list[dict]:
-    """Convert LangChain BaseTool list to Anthropic tool schema format."""
+    """Convert LangChain tools and schemas to Anthropic tool format."""
     result = []
     for t in tools:
+        if isinstance(t, dict) or (isinstance(t, type) and is_basemodel_subclass(t)):
+            function = convert_to_openai_tool(t)["function"]
+            result.append({
+                "name": function["name"],
+                "description": function.get("description") or "",
+                "input_schema": function.get("parameters", {}),
+            })
+            continue
+
         schema: dict = {}
         if hasattr(t, "args_schema") and t.args_schema:
             try:
@@ -172,6 +185,28 @@ class SwitchboardChatModel(BaseChatModel):
     def bind_tools(self, tools, **kwargs):
         formatted = _format_tools(tools)
         return super().bind(tools=formatted, **kwargs)
+
+    def with_structured_output(self, schema, *, include_raw=False, **kwargs):
+        if include_raw:
+            raise NotImplementedError("Switchboard structured output does not support include_raw")
+
+        parser = PydanticOutputParser(pydantic_object=schema)
+        instructions = parser.get_format_instructions() + "\nReply with only the JSON object."
+
+        def add_format_instructions(prompt):
+            return [*self._convert_input(prompt).to_messages(), HumanMessage(content=instructions)]
+
+        def parse_reply(reply):
+            content = reply.content
+            try:
+                return parser.parse(content)
+            except OutputParserException:
+                start, end = content.find("{"), content.rfind("}")
+                if start == -1 or end <= start:
+                    raise
+                return parser.parse(content[start:end + 1])
+
+        return RunnableLambda(add_format_instructions) | self | RunnableLambda(parse_reply)
 
     def _generate(
         self,

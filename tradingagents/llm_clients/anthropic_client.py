@@ -1,4 +1,5 @@
 import re
+from inspect import signature
 from typing import Any, Optional
 
 from langchain_anthropic import ChatAnthropic
@@ -10,6 +11,9 @@ _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "api_key", "max_tokens",
     "callbacks", "http_client", "http_async_client", "effort",
 )
+
+# Mirrors LangChain's list of model prefixes that cannot force a tool call.
+_NO_FORCED_TOOL_PREFIXES = ("claude-opus-5-5", "claude-fable-5-1")
 
 # Anthropic's ``effort`` parameter is accepted by the Opus, Sonnet, Fable and
 # Mythos families from Opus 4.5 / Sonnet 4.6 onward. Haiku (any version shipped
@@ -50,6 +54,23 @@ class NormalizedChatAnthropic(ChatAnthropic):
 
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
+
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        if method is None:
+            thinking = self.thinking
+            if self.model.startswith(_NO_FORCED_TOOL_PREFIXES) or (
+                isinstance(thinking, dict)
+                and thinking.get("type") in ("enabled", "adaptive")
+            ):
+                method = "json_schema"
+
+        bind = super().with_structured_output
+        if method is None:
+            return bind(schema, **kwargs)
+        if method == "json_schema" and "method" not in signature(bind).parameters:
+            # Older LangChain releases ignore extra kwargs and bind a forced tool.
+            raise NotImplementedError("This version of langchain-anthropic lacks json_schema support")
+        return bind(schema, method=method, **kwargs)
 
 
 class AnthropicClient(BaseLLMClient):
