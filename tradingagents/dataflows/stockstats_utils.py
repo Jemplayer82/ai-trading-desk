@@ -32,6 +32,26 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 raise
 
 
+def _schwab_candle_dates(series: pd.Series) -> pd.Series:
+    """Parse candle timestamps as timezone-naive UTC dates."""
+    def parse(value):
+        if isinstance(value, str) and value.isdecimal():
+            value = int(value)
+
+        if pd.api.types.is_integer(value) or pd.api.types.is_float(value):
+            date = pd.to_datetime(value, unit="ms", utc=True)
+        elif isinstance(value, str):
+            date = pd.to_datetime(value, format="ISO8601", utc=True)
+        else:
+            raise ValueError("Invalid Schwab candle datetime")
+
+        if pd.isna(date):
+            raise ValueError("Missing Schwab candle datetime")
+        return date
+
+    return series.map(parse).dt.tz_localize(None)
+
+
 def _schwab_ohlcv(symbol: str, start_str: str, end_str: str) -> pd.DataFrame | None:
     """Fetch ~5y daily OHLCV from the Schwab MCP server, or None to fall back.
 
@@ -49,7 +69,7 @@ def _schwab_ohlcv(symbol: str, start_str: str, end_str: str) -> pd.DataFrame | N
         if not candles:
             return None
         df = pd.DataFrame(candles)
-        df["Date"] = pd.to_datetime(df["datetime"], unit="ms")
+        df["Date"] = _schwab_candle_dates(df["datetime"])
         df = df.rename(columns={
             "open": "Open", "high": "High", "low": "Low",
             "close": "Close", "volume": "Volume",
