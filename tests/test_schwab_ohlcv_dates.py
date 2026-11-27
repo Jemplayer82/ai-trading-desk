@@ -6,7 +6,6 @@ import pytest
 from tradingagents.dataflows import schwab_mcp
 from tradingagents.dataflows.stockstats_utils import _clean_dataframe, _schwab_ohlcv
 
-
 EPOCH_MS = (1635742800000, 1635829200000)
 ISO_UTC = ("2021-11-01T05:00:00.000Z", "2021-11-02T05:00:00.000Z")
 EXPECTED_DATES = pd.Series(
